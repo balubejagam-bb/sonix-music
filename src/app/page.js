@@ -89,10 +89,11 @@ function useYouTubePlayer() {
 
   function play() { playerRef.current?.playVideo(); }
   function pause() { playerRef.current?.pauseVideo(); }
+  function playVideoById(vId) { if (ytReady) { playerRef.current.loadVideoById(vId); playerRef.current.playVideo(); } }
   function seekTo(t) { playerRef.current?.seekTo(t, true); }
   function setVolume(v) { playerRef.current?.setVolume(v); }
 
-  return { ytReady, isPlaying, duration, currentTime, searchAndPlay, play, pause, seekTo, setVolume, onEndRef };
+  return { ytReady, isPlaying, duration, currentTime, searchAndPlay, playVideoById, play, pause, seekTo, setVolume, onEndRef };
 }
 
 // ─────────────────────── FORMAT TIME ───────────────────────
@@ -125,6 +126,8 @@ export default function Home() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isLoadingSong, setIsLoadingSong] = useState(false);
   const [fullPlayerOpen, setFullPlayerOpen] = useState(false);
+  const [ytResults, setYtResults] = useState([]);
+  const [isSearchingYT, setIsSearchingYT] = useState(false);
   const [visualizer, setVisualizer] = useState('waves'); // waves, bars, pulse
   const searchTimer = useRef(null);
 
@@ -198,7 +201,7 @@ export default function Home() {
   // ───── Search ─────
   useEffect(() => {
     if (searchTimer.current) clearTimeout(searchTimer.current);
-    if (!search.trim()) { setSearchResults([]); setIsSearching(false); return; }
+    if (!search.trim()) { setSearchResults([]); setYtResults([]); setIsSearching(false); return; }
     setIsSearching(true);
     searchTimer.current = setTimeout(() => {
       const q = search.toLowerCase();
@@ -216,6 +219,17 @@ export default function Home() {
     }, 300);
   }, [search, cachedSongs]);
 
+  async function searchGlobalYT() {
+    if (!search.trim()) return;
+    setIsSearchingYT(true);
+    try {
+      const res = await fetch(`/api/youtube-search?q=${encodeURIComponent(search)}&multi=true`);
+      const data = await res.json();
+      setYtResults(data.results || []);
+    } catch(e) { console.error('YT Global search failed', e); }
+    setIsSearchingYT(false);
+  }
+
   // ───── Play song (core function) ─────
   async function playSongDirect(song, songList) {
     if (isLoadingSong) return; // prevent double-clicks
@@ -223,25 +237,39 @@ export default function Home() {
     setCurrentSong(song);
 
     if (songList) {
-      const idx = songList.findIndex(s => s.songId === song.songId);
+      const idx = songList.findIndex(s => (s.songId || s.videoId) === (song.songId || song.videoId));
       queueRef.current = songList;
       queueIndexRef.current = idx >= 0 ? idx : 0;
     }
 
-    const success = await yt.searchAndPlay(song.title, song.artist);
-    setIsLoadingSong(false);
+    try {
+      if (song.videoId) {
+        yt.playVideoById(song.videoId);
+      } else {
+        await yt.searchAndPlay(song.title, song.artist);
+      }
+      
+      setIsLoadingSong(false);
 
-    if (success && 'mediaSession' in navigator) {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: song.title,
-        artist: song.artist,
-        album: song.album,
-        artwork: song.image ? [{ src: song.image, sizes: '150x150', type: 'image/jpeg' }] : [],
-      });
-      navigator.mediaSession.setActionHandler('play', () => yt.play());
-      navigator.mediaSession.setActionHandler('pause', () => yt.pause());
-      navigator.mediaSession.setActionHandler('previoustrack', () => handlePrev());
-      navigator.mediaSession.setActionHandler('nexttrack', () => handleNext());
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: song.title,
+          artist: song.artist,
+          album: song.album || 'Sonix Music',
+          artwork: [{ 
+            src: song.thumbnail || song.image || `https://img.youtube.com/vi/${song.videoId}/mqdefault.jpg`, 
+            sizes: '512x512', 
+            type: 'image/jpeg' 
+          }]
+        });
+        navigator.mediaSession.setActionHandler('play', () => yt.play());
+        navigator.mediaSession.setActionHandler('pause', () => yt.pause());
+        navigator.mediaSession.setActionHandler('previoustrack', () => handlePrev());
+        navigator.mediaSession.setActionHandler('nexttrack', () => handleNext());
+      }
+    } catch (e) {
+      console.error('Playback error:', e);
+      setIsLoadingSong(false);
     }
   }
 
@@ -484,12 +512,59 @@ export default function Home() {
             </div>
           )}
 
-          {!loading && displaySongs.length === 0 && (
-            <div style={{ textAlign: 'center', padding: '60px 20px', color: '#6b7280' }}>
-              <div style={{ fontSize: '48px', marginBottom: '16px' }}>🎵</div>
-              <p>No songs found. Try a different search or filter.</p>
-            </div>
-          )}
+            {/* YouTube Results Grid */}
+            {ytResults.length > 0 && (
+              <>
+                <div className="section-header fade-in" style={{ marginTop: '20px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '20px' }}>
+                  <h2>YouTube Discovery</h2>
+                  <span style={{ color: '#ff0000', fontSize: '13px', fontWeight: 'bold' }}>YT GLOBAL</span>
+                </div>
+                <div className="song-list">
+                  {ytResults.map((v, i) => (
+                    <div 
+                      key={v.videoId} 
+                      className={`song-row fade-in ${currentSong?.videoId === v.videoId ? 'playing' : ''}`}
+                      onClick={() => playSongDirect({ ...v, image: v.thumbnail }, ytResults)}
+                    >
+                      <span className="song-num">🌐</span>
+                      <img className="song-img" src={v.thumbnail} alt="" loading="lazy" />
+                      <div className="song-details">
+                        <div className="song-title">{v.title}</div>
+                        <div className="song-artist">{v.artist}</div>
+                      </div>
+                      <div className="song-duration">YouTube</div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {/* Global Search Trigger */}
+            {search.trim() && !loading && (
+              <div style={{ textAlign: 'center', padding: displaySongs.length === 0 && ytResults.length === 0 ? '60px 20px' : '40px 0' }}>
+                {displaySongs.length === 0 && ytResults.length === 0 && (
+                  <div style={{ fontSize: '48px', marginBottom: '16px' }}>🔍</div>
+                )}
+                <p style={{ color: '#9ca3af', marginBottom: '20px', fontSize: '14px' }}>
+                  {displaySongs.length === 0 && ytResults.length === 0 ? "Not in Library." : "Can't find a specific version?"}
+                </p>
+                <button 
+                  className="pill active" 
+                  style={{ padding: '12px 32px', borderRadius: '50px', background: 'var(--accent-primary)', color: '#000', fontWeight: 'bold' }}
+                  onClick={searchGlobalYT}
+                  disabled={isSearchingYT}
+                >
+                  {isSearchingYT ? '⏳ Searching YouTube...' : '🌐 Search Global YouTube'}
+                </button>
+              </div>
+            )}
+
+            {!loading && !search.trim() && displaySongs.length === 0 && (
+              <div style={{ textAlign: 'center', padding: '60px 20px', color: '#6b7280' }}>
+                <div style={{ fontSize: '48px', marginBottom: '16px' }}>🎵</div>
+                <p>Welcome back! Start searching to listen.</p>
+              </div>
+            )}
         </div>
       </main>
 

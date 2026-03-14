@@ -19,7 +19,7 @@ const INVIDIOUS_INSTANCES = [
   'https://invidious.perennialte.ch',
 ];
 
-async function searchWithInvidious(query) {
+async function searchWithInvidious(query, multi = false) {
   for (const instance of INVIDIOUS_INSTANCES) {
     try {
       const url = `${instance}/api/v1/search?q=${encodeURIComponent(query)}&type=video&sort_by=relevance`;
@@ -30,9 +30,10 @@ async function searchWithInvidious(query) {
       if (!res.ok) continue;
       const data = await res.json();
       if (Array.isArray(data) && data.length > 0) {
-        const video = data.find(i => i.type === 'video' && i.videoId);
-        if (video) {
-          return { videoId: video.videoId, title: video.title || '' };
+        const videos = data.filter(i => i.type === 'video' && i.videoId);
+        if (videos.length > 0) {
+          if (multi) return videos.map(v => ({ videoId: v.videoId, title: v.title, artist: v.author, thumbnail: v.videoThumbnails?.[0]?.url || `https://img.youtube.com/vi/${v.videoId}/mqdefault.jpg` }));
+          return { videoId: videos[0].videoId, title: videos[0].title || '' };
         }
       }
     } catch (e) {
@@ -42,7 +43,7 @@ async function searchWithInvidious(query) {
   return null;
 }
 
-async function searchWithPiped(query) {
+async function searchWithPiped(query, multi = false) {
   for (const instance of PIPED_INSTANCES) {
     for (const filter of ['music_songs', 'videos']) {
       try {
@@ -50,11 +51,15 @@ async function searchWithPiped(query) {
         const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
         if (!res.ok) continue;
         const data = await res.json();
-        const items = data.items || data;
-        const video = items?.find(i => i.url?.includes('/watch'));
-        if (video) {
-          const videoId = video.url.replace('/watch?v=', '');
-          return { videoId, title: video.title || '' };
+        const items = (data.items || data).filter(i => i.url?.includes('/watch'));
+        if (items.length > 0) {
+          if (multi) return items.map(i => {
+            const videoId = i.url.split('v=')[1]?.split('&')[0];
+            return { videoId, title: i.title, artist: i.uploaderName || i.uploader, thumbnail: i.thumbnail || `https://img.youtube.com/vi/${videoId}/mqdefault.jpg` };
+          }).filter(v => v.videoId);
+          const first = items[0];
+          const videoId = first.url.split('v=')[1]?.split('&')[0];
+          return { videoId, title: first.title || '' };
         }
       } catch (e) {
         continue;
@@ -90,7 +95,7 @@ async function searchWithYTScrape(query) {
 
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
-  const q = searchParams.get('q') || '';
+  const multi = searchParams.get('multi') === 'true';
 
   if (!q) {
     return NextResponse.json({ error: 'Missing query' }, { status: 400 });
@@ -98,10 +103,27 @@ export async function GET(request) {
 
   // Try all methods in parallel for speed
   const [invidiousResult, pipedResult, scrapeResult] = await Promise.allSettled([
-    searchWithInvidious(q),
-    searchWithPiped(q),
-    searchWithYTScrape(q),
+    searchWithInvidious(q, multi),
+    searchWithPiped(q, multi),
+    searchWithYTScrape(q), // Scrape doesn't support multi yet
   ]);
+
+  if (multi) {
+    // Collect all unique results from multi-sources
+    const results = [];
+    const seen = new Set();
+    [invidiousResult, pipedResult].forEach(res => {
+      if (res.status === 'fulfilled' && Array.isArray(res.value)) {
+        res.value.forEach(v => {
+          if (!seen.has(v.videoId)) {
+            seen.add(v.videoId);
+            results.push(v);
+          }
+        });
+      }
+    });
+    return NextResponse.json({ results: results.slice(0, 15) });
+  }
 
   // Return the first successful result
   for (const result of [invidiousResult, pipedResult, scrapeResult]) {
