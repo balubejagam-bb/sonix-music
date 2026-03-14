@@ -15,9 +15,7 @@ function getMusicControls() {
 }
 
 function canUseNativePlugins() {
-  // Some Android devices/ROMs crash inside native media/background plugins.
-  // Keep playback on the stable web path unless explicitly enabled later.
-  return Capacitor.isNativePlatform() && Capacitor.getPlatform() !== 'android';
+  return Capacitor.isNativePlatform();
 }
 
 // ─────────────────────── YOUTUBE AUDIO ENGINE ───────────────────────
@@ -158,6 +156,8 @@ export default function Home() {
   const [ytResults, setYtResults] = useState([]);
   const [isSearchingYT, setIsSearchingYT] = useState(false);
   const [visualizer, setVisualizer] = useState('waves'); // waves, bars, pulse
+  const [isShuffle, setIsShuffle] = useState(false);
+  const [repeatMode, setRepeatMode] = useState('all'); // off | all | one
   const searchTimer = useRef(null);
 
   // Use refs for queue to avoid stale closures in next/prev
@@ -315,6 +315,8 @@ export default function Home() {
           cover: safeCover,
           isPlaying: !!playing,
           dismissable: true,
+          hasPlay: true,
+          hasPause: true,
           hasPrev: true,
           hasNext: true,
           hasClose: true,
@@ -548,10 +550,24 @@ export default function Home() {
   }, []);
 
   // ───── Next / Prev using refs (never stale) ─────
-  function handleNext() {
+  function handleNext(manual = true) {
     const q = queueRef.current;
     if (q.length === 0) return;
-    const nextIdx = (queueIndexRef.current + 1) % q.length;
+
+    if (!manual && repeatMode === 'one') {
+      playSongDirect(q[queueIndexRef.current], null);
+      return;
+    }
+
+    if (!manual && repeatMode === 'off' && !isShuffle && queueIndexRef.current >= q.length - 1) {
+      yt.pause();
+      return;
+    }
+
+    const nextIdx = isShuffle
+      ? getShuffleIndex(q.length, queueIndexRef.current)
+      : (queueIndexRef.current + 1) % q.length;
+
     queueIndexRef.current = nextIdx;
     playSongDirect(q[nextIdx], null); // null = don't reset queue
   }
@@ -559,15 +575,25 @@ export default function Home() {
   function handlePrev() {
     const q = queueRef.current;
     if (q.length === 0) return;
-    const prevIdx = queueIndexRef.current <= 0 ? q.length - 1 : queueIndexRef.current - 1;
+    const prevIdx = isShuffle
+      ? getShuffleIndex(q.length, queueIndexRef.current)
+      : (queueIndexRef.current <= 0 ? q.length - 1 : queueIndexRef.current - 1);
     queueIndexRef.current = prevIdx;
     playSongDirect(q[prevIdx], null);
   }
 
   // Auto-play next on song end
   useEffect(() => {
-    yt.onEndRef.current = handleNext;
-  });
+    yt.onEndRef.current = () => handleNext(false);
+  }, [repeatMode, isShuffle]);
+
+  useEffect(() => {
+    if (!canUseNativePlugins() || !BackgroundMode || !currentSong) return;
+
+    const title = currentSong.title || 'Sonix Music';
+    const text = yt.isPlaying ? `Playing: ${title}` : `Paused: ${title}`;
+    BackgroundMode.updateNotification({ title: 'Sonix Music', text, hidden: false }).catch(() => {});
+  }, [currentSong, yt.isPlaying]);
 
   // ───── Open playlist ─────
   async function openPlaylist(pl) {
@@ -604,6 +630,27 @@ export default function Home() {
 
   function handleVolume(v) { setVolumeState(v); yt.setVolume(v); }
   function loadMore() { loadSongs(page + 1, { search, genre, source }); }
+
+  function toggleShuffle() {
+    setIsShuffle(prev => !prev);
+  }
+
+  function toggleRepeatMode() {
+    setRepeatMode((prev) => {
+      if (prev === 'off') return 'all';
+      if (prev === 'all') return 'one';
+      return 'off';
+    });
+  }
+
+  function getShuffleIndex(length, currentIndex) {
+    if (length <= 1) return currentIndex;
+    let nextIndex = currentIndex;
+    while (nextIndex === currentIndex) {
+      nextIndex = Math.floor(Math.random() * length);
+    }
+    return nextIndex;
+  }
 
   const displaySongs = search.trim() ? searchResults : songs;
 
@@ -900,13 +947,23 @@ export default function Home() {
 
             <div className="player-controls">
               <div className="player-buttons">
-                <button className="hide-mobile" title="Shuffle">🔀</button>
+                <button
+                  className="hide-mobile"
+                  title={`Shuffle: ${isShuffle ? 'On' : 'Off'}`}
+                  onClick={(e) => { e.stopPropagation(); toggleShuffle(); }}
+                  style={{ opacity: isShuffle ? 1 : 0.65 }}
+                >🔀</button>
                 <button onClick={(e) => { e.stopPropagation(); handlePrev(); }} title="Previous">⏮</button>
                 <button className="play-pause-btn" onClick={(e) => { e.stopPropagation(); yt.isPlaying ? yt.pause() : yt.play(); }}>
                   {isLoadingSong ? <div className="spinner-small"></div> : yt.isPlaying ? '⏸' : '▶'}
                 </button>
                 <button onClick={(e) => { e.stopPropagation(); handleNext(); }} title="Next">⏭</button>
-                <button className="hide-mobile" title="Repeat">🔁</button>
+                <button
+                  className="hide-mobile"
+                  title={`Repeat: ${repeatMode}`}
+                  onClick={(e) => { e.stopPropagation(); toggleRepeatMode(); }}
+                  style={{ opacity: repeatMode === 'off' ? 0.65 : 1 }}
+                >{repeatMode === 'one' ? '🔂' : '🔁'}</button>
               </div>
               <div className="player-progress">
                 <span className="time">{fmt(yt.currentTime)}</span>
@@ -1002,13 +1059,13 @@ export default function Home() {
                 </div>
 
                 <div className="controls-row-lg">
-                  <button className="icon-btn">🔀</button>
+                  <button className="icon-btn" onClick={toggleShuffle} style={{ opacity: isShuffle ? 1 : 0.65 }}>🔀</button>
                   <button className="icon-btn skip" onClick={handlePrev}>⏮</button>
                   <button className="play-pause-btn-lg" onClick={() => yt.isPlaying ? yt.pause() : yt.play()}>
                     {isLoadingSong ? <div className="spinner-small"></div> : yt.isPlaying ? '⏸' : '▶'}
                   </button>
                   <button className="icon-btn skip" onClick={handleNext}>⏭</button>
-                  <button className="icon-btn">🔁</button>
+                  <button className="icon-btn" onClick={toggleRepeatMode} style={{ opacity: repeatMode === 'off' ? 0.65 : 1 }}>{repeatMode === 'one' ? '🔂' : '🔁'}</button>
                 </div>
               </div>
             </div>
