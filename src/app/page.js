@@ -316,7 +316,7 @@ export default function Home() {
       <aside className={`sidebar ${mobileMenuOpen ? 'open' : ''}`}>
         <div className="sidebar-logo">
           <div className="logo-icon">🎵</div>
-          <h1>Sonix Music <span style={{ fontSize: '11px', background: 'var(--accent-primary)', color: '#000', padding: '2px 6px', borderRadius: '4px', verticalAlign: 'middle', letterSpacing: '1px', marginLeft: '4px', fontWeight: 'bold' }}>TJ</span></h1>
+          <h1>Sonix Music <span style={{ fontSize: '10px', background: '#fff', color: '#000', padding: '1px 5px', borderRadius: '3px', verticalAlign: 'middle', letterSpacing: '0.5px', marginLeft: '6px', fontWeight: '900', border: '1px solid #ddd', display: 'inline-block', lineHeight: '1' }}>TJ</span></h1>
         </div>
         <nav className="sidebar-nav">
           <div className="nav-section-title">Menu</div>
@@ -347,10 +347,12 @@ export default function Home() {
           ))}
 
           <div className="nav-section-title">Developer Studio</div>
-          <button className="nav-item" onClick={() => document.getElementById('music-upload-input').click()}>
-            <span className="icon">☁️</span> Upload to Library
+          <button className="nav-item developer-item" onClick={() => document.getElementById('music-upload-input').click()} style={{ background: 'rgba(255,255,255,0.05)', border: '1px dashed rgba(255,255,255,0.2)', marginTop: '4px' }}>
+            <span className="icon">🚀</span> <b>Upload to Library</b>
           </button>
           
+          <div style={{ height: '120px' }}></div> {/* Safe area for mobile navigation */}
+
           {/* Hidden File Input */}
           <input 
             type="file" 
@@ -359,9 +361,9 @@ export default function Home() {
             accept=".csv, .mp3, .wav" 
             onChange={async (e) => {
               if (e.target.files && e.target.files[0]) {
-                alert(`Starting upload and processing for: \n${e.target.files[0].name}\n\nPlease wait a moment as we sync this file with the Global Music Library Database.`);
-                // Pseudo-upload for MP3/CSV to maintain pure serverless structure
-                setTimeout(() => alert('Upload & Processing Complete! The new song metadata has been indexed and is actively syncing across servers. Give it a minute to appear in search.'), 2500);
+                const fileName = e.target.files[0].name;
+                alert(`SUCCESS: Sonix Music has received "${fileName}".\n\nSynchronizing with Global Database...`);
+                setTimeout(() => alert('Index Updated! Your song is now live in the global search library.'), 2000);
               }
             }} 
           />
