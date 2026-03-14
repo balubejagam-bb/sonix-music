@@ -426,6 +426,20 @@ html, body {
   animation: pulse-icon 1s ease infinite;
 }
 
+.song-loading-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(167, 139, 250, 0.35);
+  border-top-color: #a78bfa;
+  border-radius: 50%;
+  animation: songSpin 0.7s linear infinite;
+}
+
+@keyframes songSpin {
+  to { transform: rotate(360deg); }
+}
+
 @keyframes pulse-icon {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }

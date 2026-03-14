@@ -23,6 +23,7 @@ function useYouTubePlayer() {
   const [currentTime, setCurrentTime] = useState(0);
   const timerRef = useRef(null);
   const onEndRef = useRef(null);
+  const pendingVideoIdRef = useRef(null);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -37,7 +38,15 @@ function useYouTubePlayer() {
         height: '1', width: '1',
         playerVars: { autoplay: 0, controls: 0, disablekb: 1, fs: 0, modestbranding: 1, rel: 0 },
         events: {
-          onReady: () => setYtReady(true),
+          onReady: () => {
+            setYtReady(true);
+            // If user tapped a song before iframe finished loading, start it now.
+            if (pendingVideoIdRef.current) {
+              playerRef.current.loadVideoById(pendingVideoIdRef.current);
+              playerRef.current.playVideo();
+              pendingVideoIdRef.current = null;
+            }
+          },
           onStateChange: (e) => {
             if (e.data === window.YT.PlayerState.PLAYING) {
               setIsPlaying(true);
@@ -94,7 +103,16 @@ function useYouTubePlayer() {
 
   function play() { playerRef.current?.playVideo(); }
   function pause() { playerRef.current?.pauseVideo(); }
-  function playVideoById(vId) { if (ytReady) { playerRef.current.loadVideoById(vId); playerRef.current.playVideo(); } }
+  function playVideoById(vId) {
+    if (!vId) return false;
+    if (!ytReady || !playerRef.current) {
+      pendingVideoIdRef.current = vId;
+      return false;
+    }
+    playerRef.current.loadVideoById(vId);
+    playerRef.current.playVideo();
+    return true;
+  }
   function seekTo(t) { playerRef.current?.seekTo(t, true); }
   function setVolume(v) { playerRef.current?.setVolume(v); }
 
@@ -129,6 +147,7 @@ export default function Home() {
   const [isSearching, setIsSearching] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isLoadingSong, setIsLoadingSong] = useState(false);
+  const [loadingSongKey, setLoadingSongKey] = useState(null);
   const [fullPlayerOpen, setFullPlayerOpen] = useState(false);
   const [ytResults, setYtResults] = useState([]);
   const [isSearchingYT, setIsSearchingYT] = useState(false);
@@ -141,6 +160,8 @@ export default function Home() {
   const videoIdCacheRef = useRef(new Map());
   const pendingVideoIdRef = useRef(new Map());
   const controlsBoundRef = useRef(false);
+  const nativeControlsEnabledRef = useRef(true);
+  const lastNativeTrackKeyRef = useRef(null);
 
   // ───── Load initial data & cache ─────
   useEffect(() => {
@@ -160,80 +181,149 @@ export default function Home() {
       }
     }
     initNativeBackground();
+
+    const onVisibilityChange = async () => {
+      if (!Capacitor.isNativePlatform() || !BackgroundMode) return;
+      if (!document.hidden) return;
+      try {
+        await BackgroundMode.enable();
+        await BackgroundMode.updateNotification({ title: 'Sonix Music', text: 'Playing in background', hidden: false });
+      } catch (e) {
+        console.error('Background mode resume error:', e);
+      }
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
     loadPlaylists();
     loadSongs(1);
     backgroundCache();
+
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
   }, []);
 
-  function bindNativeMediaControls() {
-    if (!Capacitor.isNativePlatform() || controlsBoundRef.current) return;
-    const controls = getMusicControls();
-    if (!controls) return;
-
-    controls.subscribe((action) => {
+  async function fetchJsonWithFallback(paths) {
+    for (const url of paths) {
       try {
-        const payload = typeof action === 'string' ? JSON.parse(action) : action;
-        const message = payload?.message;
-
-        switch (message) {
-          case 'music-controls-next':
-          case 'music-controls-media-button-next':
-            handleNext();
-            break;
-          case 'music-controls-previous':
-          case 'music-controls-media-button-previous':
-            handlePrev();
-            break;
-          case 'music-controls-play':
-          case 'music-controls-media-button-play':
-            yt.play();
-            break;
-          case 'music-controls-pause':
-          case 'music-controls-media-button-pause':
-            yt.pause();
-            break;
-          case 'music-controls-toggle-play-pause':
-          case 'music-controls-media-button-play-pause':
-            if (yt.isPlaying) yt.pause();
-            else yt.play();
-            break;
-          case 'music-controls-destroy':
-            yt.pause();
-            break;
-          default:
-            break;
-        }
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 6000);
+        const res = await fetch(url, { signal: controller.signal });
+        clearTimeout(timer);
+        if (!res.ok) continue;
+        return await res.json();
       } catch (e) {
-        console.error('MusicControls event error:', e);
+        continue;
       }
-    });
-    controls.listen();
-    controlsBoundRef.current = true;
+    }
+    return null;
+  }
+
+  async function searchYouTubeFallback(query, multi = false) {
+    const endpoints = [
+      `/api/youtube-search?q=${encodeURIComponent(query)}${multi ? '&multi=true' : ''}`,
+      `https://sonix-music.vercel.app/api/youtube-search?q=${encodeURIComponent(query)}${multi ? '&multi=true' : ''}`,
+    ];
+    return fetchJsonWithFallback(endpoints);
+  }
+
+  function bindNativeMediaControls() {
+    if (!Capacitor.isNativePlatform() || controlsBoundRef.current || !nativeControlsEnabledRef.current) return;
+    const controls = getMusicControls();
+    if (!controls || typeof controls.subscribe !== 'function' || typeof controls.listen !== 'function') {
+      nativeControlsEnabledRef.current = false;
+      return;
+    }
+
+    try {
+      controls.subscribe((action) => {
+        try {
+          let message = '';
+          if (typeof action === 'string') {
+            try {
+              const parsed = JSON.parse(action);
+              message = parsed?.message || action;
+            } catch {
+              message = action;
+            }
+          } else {
+            message = action?.message || '';
+          }
+
+          switch (message) {
+            case 'music-controls-next':
+            case 'music-controls-media-button-next':
+              handleNext();
+              break;
+            case 'music-controls-previous':
+            case 'music-controls-media-button-previous':
+              handlePrev();
+              break;
+            case 'music-controls-play':
+            case 'music-controls-media-button-play':
+              yt.play();
+              break;
+            case 'music-controls-pause':
+            case 'music-controls-media-button-pause':
+              yt.pause();
+              break;
+            case 'music-controls-toggle-play-pause':
+            case 'music-controls-media-button-play-pause':
+              if (yt.isPlaying) yt.pause();
+              else yt.play();
+              break;
+            case 'music-controls-destroy':
+              yt.pause();
+              break;
+            default:
+              break;
+          }
+        } catch (e) {
+          console.error('MusicControls event error:', e);
+        }
+      });
+      controls.listen();
+      controlsBoundRef.current = true;
+    } catch (e) {
+      console.error('MusicControls bind error:', e);
+      nativeControlsEnabledRef.current = false;
+    }
   }
 
   function syncNativeMediaControls(song, playing) {
-    if (!Capacitor.isNativePlatform() || !song) return;
+    if (!Capacitor.isNativePlatform() || !song || !nativeControlsEnabledRef.current) return;
     const controls = getMusicControls();
     if (!controls) return;
 
     const cover = song.thumbnail || song.image || (song.videoId ? `https://img.youtube.com/vi/${song.videoId}/mqdefault.jpg` : '');
-    controls.create({
-      track: song.title || 'Unknown Track',
-      artist: song.artist || 'Unknown Artist',
-      album: song.album || 'Sonix Music',
-      cover,
-      isPlaying: !!playing,
-      dismissable: true,
-      hasPrev: true,
-      hasNext: true,
-      hasClose: true,
-      ticker: song.title || 'Sonix Music',
-      notificationIcon: 'notification'
-    }, () => {}, (err) => {
-      console.error('MusicControls create error:', err);
-    });
+    const trackKey = song.songId || song.videoId || `${song.title || ''}::${song.artist || ''}`;
 
-    controls.updateIsPlaying(!!playing);
+    try {
+      if (lastNativeTrackKeyRef.current !== trackKey && typeof controls.create === 'function') {
+        controls.create({
+          track: song.title || 'Unknown Track',
+          artist: song.artist || 'Unknown Artist',
+          album: song.album || 'Sonix Music',
+          cover,
+          isPlaying: !!playing,
+          dismissable: true,
+          hasPrev: true,
+          hasNext: true,
+          hasClose: true,
+          ticker: song.title || 'Sonix Music'
+        }, () => {}, (err) => {
+          console.error('MusicControls create error:', err);
+        });
+        lastNativeTrackKeyRef.current = trackKey;
+      }
+
+      if (typeof controls.updateIsPlaying === 'function') {
+        controls.updateIsPlaying(!!playing);
+      }
+    } catch (e) {
+      console.error('MusicControls sync error:', e);
+      nativeControlsEnabledRef.current = false;
+    }
   }
 
   async function loadPlaylists() {
@@ -283,8 +373,7 @@ export default function Home() {
     }
 
     const query = `${song.title || ''} ${song.artist || ''} official audio`.trim();
-    const task = fetch(`/api/youtube-search?q=${encodeURIComponent(query)}`)
-      .then(r => r.json())
+    const task = searchYouTubeFallback(query)
       .then(data => {
         if (data?.videoId) {
           videoIdCacheRef.current.set(key, data.videoId);
@@ -364,8 +453,7 @@ export default function Home() {
     if (!search.trim()) return;
     setIsSearchingYT(true);
     try {
-      const res = await fetch(`/api/youtube-search?q=${encodeURIComponent(search)}&multi=true`);
-      const data = await res.json();
+      const data = await searchYouTubeFallback(search, true);
       setYtResults(data.results || []);
     } catch(e) { console.error('YT Global search failed', e); }
     setIsSearchingYT(false);
@@ -374,7 +462,9 @@ export default function Home() {
   // ───── Play song (core function) ─────
   async function playSongDirect(song, songList) {
     if (isLoadingSong) return; // prevent double-clicks
+    const key = songKey(song);
     setIsLoadingSong(true);
+    setLoadingSongKey(key);
 
     if (songList) {
       const idx = songList.findIndex(s => (s.songId || s.videoId) === (song.songId || song.videoId));
@@ -388,7 +478,11 @@ export default function Home() {
 
       if (resolvedVideoId) {
         setCurrentSong(playableSong);
-        yt.playVideoById(resolvedVideoId);
+        const started = yt.playVideoById(resolvedVideoId);
+        // If player isn't ready yet, fallback search can still start playback when ready.
+        if (!started && yt.ytReady) {
+          await yt.searchAndPlay(song.title, song.artist);
+        }
       } else {
         setCurrentSong(song);
         await yt.searchAndPlay(song.title, song.artist);
@@ -418,7 +512,9 @@ export default function Home() {
       syncNativeMediaControls(playableSong, true);
     } catch (e) {
       console.error('Playback error:', e);
+    } finally {
       setIsLoadingSong(false);
+      setLoadingSongKey(null);
     }
   }
 
@@ -426,6 +522,20 @@ export default function Home() {
     if (!currentSong) return;
     syncNativeMediaControls(currentSong, yt.isPlaying);
   }, [currentSong, yt.isPlaying]);
+
+  useEffect(() => {
+    return () => {
+      if (!Capacitor.isNativePlatform()) return;
+      const controls = getMusicControls();
+      if (controls && typeof controls.destroy === 'function') {
+        try {
+          controls.destroy();
+        } catch (e) {
+          console.error('MusicControls destroy error:', e);
+        }
+      }
+    };
+  }, []);
 
   // ───── Next / Prev using refs (never stale) ─────
   function handleNext() {
@@ -671,7 +781,9 @@ export default function Home() {
                 onClick={() => playSongDirect(song, displaySongs)}
               >
                 <span className="song-num">
-                  {currentSong?.songId === song.songId ? (
+                  {loadingSongKey === (song.songId || song._id || song.videoId || `${song.title || ''}::${song.artist || ''}`) ? (
+                    <span className="song-loading-spinner" aria-label="Loading song"></span>
+                  ) : currentSong?.songId === song.songId ? (
                     <span className="equalizer">
                       <span className="bar"></span><span className="bar"></span><span className="bar"></span>
                     </span>
