@@ -94,6 +94,7 @@ html, body {
   font-weight: 800;
   background: var(--gradient-neon);
   -webkit-background-clip: text;
+  background-clip: text;
   -webkit-text-fill-color: transparent;
   letter-spacing: -0.5px;
 }
@@ -155,7 +156,7 @@ html, body {
 }
 
 .content-scroll {
-  padding: 24px 32px 32px;
+  padding: 24px 32px 100px;
 }
 
 /* Search Bar */
@@ -167,6 +168,9 @@ html, body {
   background: rgba(10, 10, 26, 0.85);
   backdrop-filter: blur(20px);
   border-bottom: 1px solid var(--border-glass);
+  display: flex;
+  align-items: center;
+  gap: 16px;
 }
 
 .search-box {
@@ -954,16 +958,13 @@ html, body {
 
 /* Cache indicator */
 .cache-badge {
-  position: fixed;
-  top: 16px;
-  right: 16px;
-  z-index: 999;
+  display: inline-flex;
+  align-items: center;
   padding: 6px 14px;
   border-radius: 50px;
   font-size: 11px;
   font-weight: 600;
-  backdrop-filter: blur(10px);
-  transition: var(--transition);
+  white-space: nowrap;
 }
 
 .cache-badge.loading {
