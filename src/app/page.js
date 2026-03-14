@@ -34,9 +34,9 @@ function useYouTubePlayer() {
     document.head.appendChild(tag);
 
     function initPlayer() {
-      playerRef.current = new window.YT.Player('yt-player-container', {
-        height: '1', width: '1',
-        playerVars: { autoplay: 0, controls: 0, disablekb: 1, fs: 0, modestbranding: 1, rel: 0 },
+      try { playerRef.current = new window.YT.Player('yt-player-container', {
+        height: '2', width: '2',
+        playerVars: { autoplay: 0, controls: 0, disablekb: 1, fs: 0, modestbranding: 1, rel: 0, playsinline: 1, origin: typeof window !== 'undefined' ? window.location.origin : '' },
         events: {
           onReady: () => {
             setYtReady(true);
@@ -63,7 +63,7 @@ function useYouTubePlayer() {
           },
           onError: () => { setIsPlaying(false); stopTimer(); }
         }
-      });
+      }); } catch(ytInitErr) { console.error('YT player init failed:', ytInitErr); }
     }
     return () => stopTimer();
   }, []);
@@ -300,24 +300,28 @@ export default function Home() {
 
     try {
       if (lastNativeTrackKeyRef.current !== trackKey && typeof controls.create === 'function') {
+        // Use a safe cover - avoid long URLs that can crash native side
+        const safeCover = cover && cover.length < 500 ? cover : '';
         controls.create({
-          track: song.title || 'Unknown Track',
-          artist: song.artist || 'Unknown Artist',
-          album: song.album || 'Sonix Music',
-          cover,
+          track: (song.title || 'Unknown Track').substring(0, 100),
+          artist: (song.artist || 'Unknown Artist').substring(0, 100),
+          album: (song.album || 'Sonix Music').substring(0, 100),
+          cover: safeCover,
           isPlaying: !!playing,
           dismissable: true,
           hasPrev: true,
           hasNext: true,
           hasClose: true,
-          ticker: song.title || 'Sonix Music'
-        }, () => {}, (err) => {
+          ticker: (song.title || 'Sonix Music').substring(0, 100)
+        }, () => {
+          lastNativeTrackKeyRef.current = trackKey;
+        }, (err) => {
           console.error('MusicControls create error:', err);
+          nativeControlsEnabledRef.current = false;
         });
-        lastNativeTrackKeyRef.current = trackKey;
       }
 
-      if (typeof controls.updateIsPlaying === 'function') {
+      if (lastNativeTrackKeyRef.current === trackKey && typeof controls.updateIsPlaying === 'function') {
         controls.updateIsPlaying(!!playing);
       }
     } catch (e) {
@@ -1005,6 +1009,12 @@ export default function Home() {
           </div>
         )}
       </div>
+      {/* Hidden YouTube player mount point - must exist for YT IFrame API */}
+      <div
+        id="yt-player-container"
+        style={{ position: 'fixed', bottom: 0, left: 0, width: '2px', height: '2px', opacity: 0, pointerEvents: 'none', zIndex: -1 }}
+        aria-hidden="true"
+      />
     </div>
   );
 }
