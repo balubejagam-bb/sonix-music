@@ -1,7 +1,13 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, registerPlugin } from '@capacitor/core';
+
+const NativeMusicPlayer = registerPlugin('MusicPlayer');
+
+function isNativeAndroid() {
+  return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
+}
 
 // Ensure BackgroundMode doesn't crash SSR
 let BackgroundMode;
@@ -15,7 +21,9 @@ function getMusicControls() {
 }
 
 function canUseNativePlugins() {
-  return Capacitor.isNativePlatform();
+  // Some Android devices/ROMs crash inside native media/background plugins.
+  // Keep playback on the stable web path unless explicitly enabled later.
+  return Capacitor.isNativePlatform() && Capacitor.getPlatform() !== 'android';
 }
 
 // ─────────────────────── YOUTUBE AUDIO ENGINE ───────────────────────
@@ -156,8 +164,9 @@ export default function Home() {
   const [ytResults, setYtResults] = useState([]);
   const [isSearchingYT, setIsSearchingYT] = useState(false);
   const [visualizer, setVisualizer] = useState('waves'); // waves, bars, pulse
-  const [isShuffle, setIsShuffle] = useState(false);
-  const [repeatMode, setRepeatMode] = useState('all'); // off | all | one
+  const [nativeIsPlaying, setNativeIsPlaying] = useState(false);
+  const [shuffleEnabled, setShuffleEnabled] = useState(false);
+  const [repeatMode, setRepeatMode] = useState('off');
   const searchTimer = useRef(null);
 
   // Use refs for queue to avoid stale closures in next/prev
@@ -168,6 +177,40 @@ export default function Home() {
   const controlsBoundRef = useRef(false);
   const nativeControlsEnabledRef = useRef(true);
   const lastNativeTrackKeyRef = useRef(null);
+  const nativeAndroid = isNativeAndroid();
+
+  function canPlayNatively(song) {
+    return nativeAndroid && typeof song?.url === 'string' && /^https?:\/\//i.test(song.url);
+  }
+
+  function buildNativeQueue(sourceQueue = [], selectedSong = null) {
+    const queue = sourceQueue
+      .filter((s) => typeof s?.url === 'string' && /^https?:\/\//i.test(s.url))
+      .map((s) => ({
+        url: s.url,
+        title: s.title || 'Unknown Track',
+        artist: s.artist || 'Unknown Artist',
+        album: s.album || 'Sonix Music',
+        artwork: s.image || s.thumbnail || '',
+      }));
+
+    if (!queue.length && selectedSong && canPlayNatively(selectedSong)) {
+      return {
+        queue: [{
+          url: selectedSong.url,
+          title: selectedSong.title || 'Unknown Track',
+          artist: selectedSong.artist || 'Unknown Artist',
+          album: selectedSong.album || 'Sonix Music',
+          artwork: selectedSong.image || selectedSong.thumbnail || '',
+        }],
+        index: 0,
+      };
+    }
+
+    const selectedUrl = selectedSong?.url || '';
+    const index = Math.max(0, queue.findIndex((s) => s.url === selectedUrl));
+    return { queue, index };
+  }
 
   // ───── Load initial data & cache ─────
   useEffect(() => {
@@ -315,8 +358,6 @@ export default function Home() {
           cover: safeCover,
           isPlaying: !!playing,
           dismissable: true,
-          hasPlay: true,
-          hasPause: true,
           hasPrev: true,
           hasNext: true,
           hasClose: true,
@@ -485,11 +526,35 @@ export default function Home() {
     }
 
     try {
+      const queueSource = songList || queueRef.current || [];
+      if (canPlayNatively(song)) {
+        try {
+          const nativePayload = buildNativeQueue(queueSource, song);
+          if (nativePayload.queue.length > 0) {
+            yt.pause();
+            await NativeMusicPlayer.playQueue({
+              queue: nativePayload.queue,
+              index: nativePayload.index,
+              shuffle: shuffleEnabled,
+              repeatMode,
+            });
+            queueRef.current = queueSource.length ? queueSource : [song];
+            queueIndexRef.current = nativePayload.index;
+            setCurrentSong(song);
+            setNativeIsPlaying(true);
+            return;
+          }
+        } catch (nativeErr) {
+          console.error('Native playback error, using web fallback:', nativeErr);
+        }
+      }
+
       const resolvedVideoId = await resolveSongVideoId(song);
       const playableSong = resolvedVideoId && !song.videoId ? { ...song, videoId: resolvedVideoId } : song;
 
       if (resolvedVideoId) {
         setCurrentSong(playableSong);
+        setNativeIsPlaying(false);
         const started = yt.playVideoById(resolvedVideoId);
         // If player isn't ready yet, fallback search can still start playback when ready.
         if (!started && yt.ytReady) {
@@ -497,6 +562,7 @@ export default function Home() {
         }
       } else {
         setCurrentSong(song);
+        setNativeIsPlaying(false);
         await yt.searchAndPlay(song.title, song.artist);
       }
 
@@ -550,50 +616,38 @@ export default function Home() {
   }, []);
 
   // ───── Next / Prev using refs (never stale) ─────
-  function handleNext(manual = true) {
+  function handleNext() {
     const q = queueRef.current;
     if (q.length === 0) return;
-
-    if (!manual && repeatMode === 'one') {
-      playSongDirect(q[queueIndexRef.current], null);
-      return;
-    }
-
-    if (!manual && repeatMode === 'off' && !isShuffle && queueIndexRef.current >= q.length - 1) {
-      yt.pause();
-      return;
-    }
-
-    const nextIdx = isShuffle
-      ? getShuffleIndex(q.length, queueIndexRef.current)
-      : (queueIndexRef.current + 1) % q.length;
-
+    const nextIdx = (queueIndexRef.current + 1) % q.length;
     queueIndexRef.current = nextIdx;
+    if (nativeAndroid && canPlayNatively(q[nextIdx])) {
+      setCurrentSong(q[nextIdx]);
+      setNativeIsPlaying(true);
+      NativeMusicPlayer.next().catch((e) => console.error('Native next failed:', e));
+      return;
+    }
     playSongDirect(q[nextIdx], null); // null = don't reset queue
   }
 
   function handlePrev() {
     const q = queueRef.current;
     if (q.length === 0) return;
-    const prevIdx = isShuffle
-      ? getShuffleIndex(q.length, queueIndexRef.current)
-      : (queueIndexRef.current <= 0 ? q.length - 1 : queueIndexRef.current - 1);
+    const prevIdx = queueIndexRef.current <= 0 ? q.length - 1 : queueIndexRef.current - 1;
     queueIndexRef.current = prevIdx;
+    if (nativeAndroid && canPlayNatively(q[prevIdx])) {
+      setCurrentSong(q[prevIdx]);
+      setNativeIsPlaying(true);
+      NativeMusicPlayer.previous().catch((e) => console.error('Native previous failed:', e));
+      return;
+    }
     playSongDirect(q[prevIdx], null);
   }
 
   // Auto-play next on song end
   useEffect(() => {
-    yt.onEndRef.current = () => handleNext(false);
-  }, [repeatMode, isShuffle]);
-
-  useEffect(() => {
-    if (!canUseNativePlugins() || !BackgroundMode || !currentSong) return;
-
-    const title = currentSong.title || 'Sonix Music';
-    const text = yt.isPlaying ? `Playing: ${title}` : `Paused: ${title}`;
-    BackgroundMode.updateNotification({ title: 'Sonix Music', text, hidden: false }).catch(() => {});
-  }, [currentSong, yt.isPlaying]);
+    yt.onEndRef.current = handleNext;
+  });
 
   // ───── Open playlist ─────
   async function openPlaylist(pl) {
@@ -628,29 +682,62 @@ export default function Home() {
     loadSongs(1, { genre, source: s });
   }
 
-  function handleVolume(v) { setVolumeState(v); yt.setVolume(v); }
-  function loadMore() { loadSongs(page + 1, { search, genre, source }); }
-
-  function toggleShuffle() {
-    setIsShuffle(prev => !prev);
-  }
-
-  function toggleRepeatMode() {
-    setRepeatMode((prev) => {
-      if (prev === 'off') return 'all';
-      if (prev === 'all') return 'one';
-      return 'off';
-    });
-  }
-
-  function getShuffleIndex(length, currentIndex) {
-    if (length <= 1) return currentIndex;
-    let nextIndex = currentIndex;
-    while (nextIndex === currentIndex) {
-      nextIndex = Math.floor(Math.random() * length);
+  function handleVolume(v) {
+    setVolumeState(v);
+    if (!nativeAndroid) {
+      yt.setVolume(v);
     }
-    return nextIndex;
   }
+
+  async function handlePlayPauseToggle() {
+    const usingNativeNow = nativeAndroid && canPlayNatively(currentSong);
+    if (usingNativeNow) {
+      try {
+        if (nativeIsPlaying) {
+          await NativeMusicPlayer.pause();
+          setNativeIsPlaying(false);
+        } else {
+          await NativeMusicPlayer.resume();
+          setNativeIsPlaying(true);
+        }
+      } catch (e) {
+        console.error('Native play/pause failed:', e);
+      }
+      return;
+    }
+    if (yt.isPlaying) yt.pause();
+    else yt.play();
+  }
+
+  async function handleToggleShuffle() {
+    const next = !shuffleEnabled;
+    setShuffleEnabled(next);
+    if (nativeAndroid) {
+      try {
+        await NativeMusicPlayer.setShuffle({ enabled: next });
+      } catch (e) {
+        console.error('Native shuffle failed:', e);
+      }
+    }
+  }
+
+  async function handleCycleRepeat() {
+    const order = ['off', 'all', 'one'];
+    const idx = order.indexOf(repeatMode);
+    const next = order[(idx + 1) % order.length];
+    setRepeatMode(next);
+    if (nativeAndroid) {
+      try {
+        await NativeMusicPlayer.setRepeatMode({ mode: next });
+      } catch (e) {
+        console.error('Native repeat failed:', e);
+      }
+    }
+  }
+
+  const activePlaying = nativeAndroid && canPlayNatively(currentSong) ? nativeIsPlaying : yt.isPlaying;
+  const repeatLabel = repeatMode === 'off' ? '🔁' : repeatMode === 'one' ? '🔂' : '🔁';
+  function loadMore() { loadSongs(page + 1, { search, genre, source }); }
 
   const displaySongs = search.trim() ? searchResults : songs;
 
@@ -947,23 +1034,15 @@ export default function Home() {
 
             <div className="player-controls">
               <div className="player-buttons">
-                <button
-                  className="hide-mobile"
-                  title={`Shuffle: ${isShuffle ? 'On' : 'Off'}`}
-                  onClick={(e) => { e.stopPropagation(); toggleShuffle(); }}
-                  style={{ opacity: isShuffle ? 1 : 0.65 }}
-                >🔀</button>
+                <button className="hide-mobile" title="Shuffle" onClick={(e) => { e.stopPropagation(); handleToggleShuffle(); }}>
+                  {shuffleEnabled ? '🔀' : '➡️'}
+                </button>
                 <button onClick={(e) => { e.stopPropagation(); handlePrev(); }} title="Previous">⏮</button>
-                <button className="play-pause-btn" onClick={(e) => { e.stopPropagation(); yt.isPlaying ? yt.pause() : yt.play(); }}>
-                  {isLoadingSong ? <div className="spinner-small"></div> : yt.isPlaying ? '⏸' : '▶'}
+                <button className="play-pause-btn" onClick={(e) => { e.stopPropagation(); handlePlayPauseToggle(); }}>
+                  {isLoadingSong ? <div className="spinner-small"></div> : activePlaying ? '⏸' : '▶'}
                 </button>
                 <button onClick={(e) => { e.stopPropagation(); handleNext(); }} title="Next">⏭</button>
-                <button
-                  className="hide-mobile"
-                  title={`Repeat: ${repeatMode}`}
-                  onClick={(e) => { e.stopPropagation(); toggleRepeatMode(); }}
-                  style={{ opacity: repeatMode === 'off' ? 0.65 : 1 }}
-                >{repeatMode === 'one' ? '🔂' : '🔁'}</button>
+                <button className="hide-mobile" title="Repeat" onClick={(e) => { e.stopPropagation(); handleCycleRepeat(); }}>{repeatLabel}</button>
               </div>
               <div className="player-progress">
                 <span className="time">{fmt(yt.currentTime)}</span>
@@ -1015,7 +1094,7 @@ export default function Home() {
             <button className="close-full-player" onClick={() => setFullPlayerOpen(false)}>▼</button>
             
             {/* Visualizer Background */}
-            <div className={`visualizer-bg ${visualizer} ${yt.isPlaying ? 'playing' : ''}`}></div>
+            <div className={`visualizer-bg ${visualizer} ${activePlaying ? 'playing' : ''}`}></div>
 
             <div className="full-player-grid">
               <div className="full-player-left">
@@ -1059,13 +1138,13 @@ export default function Home() {
                 </div>
 
                 <div className="controls-row-lg">
-                  <button className="icon-btn" onClick={toggleShuffle} style={{ opacity: isShuffle ? 1 : 0.65 }}>🔀</button>
+                  <button className="icon-btn" onClick={handleToggleShuffle}>{shuffleEnabled ? '🔀' : '➡️'}</button>
                   <button className="icon-btn skip" onClick={handlePrev}>⏮</button>
-                  <button className="play-pause-btn-lg" onClick={() => yt.isPlaying ? yt.pause() : yt.play()}>
-                    {isLoadingSong ? <div className="spinner-small"></div> : yt.isPlaying ? '⏸' : '▶'}
+                  <button className="play-pause-btn-lg" onClick={handlePlayPauseToggle}>
+                    {isLoadingSong ? <div className="spinner-small"></div> : activePlaying ? '⏸' : '▶'}
                   </button>
                   <button className="icon-btn skip" onClick={handleNext}>⏭</button>
-                  <button className="icon-btn" onClick={toggleRepeatMode} style={{ opacity: repeatMode === 'off' ? 0.65 : 1 }}>{repeatMode === 'one' ? '🔂' : '🔁'}</button>
+                  <button className="icon-btn" onClick={handleCycleRepeat}>{repeatLabel}</button>
                 </div>
               </div>
             </div>
