@@ -9,9 +9,11 @@
     "seed": "node scripts/seed.js"
   },
   "dependencies": {
+    "@anuradev/capacitor-background-mode": "^7.2.1",
     "@capacitor/android": "^8.2.0",
     "@capacitor/cli": "^8.2.0",
     "@capacitor/core": "^8.2.0",
+    "@distube/ytdl-core": "^4.16.12",
     "csv-parse": "^5.5.0",
     "mongodb": "^6.3.0",
     "next": "^14.2.0",

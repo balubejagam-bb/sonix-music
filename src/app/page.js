@@ -1,6 +1,13 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import { Capacitor } from '@capacitor/core';
+
+// Ensure BackgroundMode doesn't crash SSR
+let BackgroundMode;
+if (typeof window !== 'undefined') {
+  import('@anuradev/capacitor-background-mode').then(m => { BackgroundMode = m.BackgroundMode; }).catch(()=> {});
+}
 
 // ─────────────────────── YOUTUBE AUDIO ENGINE ───────────────────────
 function useYouTubePlayer() {
@@ -127,6 +134,16 @@ export default function Home() {
 
   // ───── Load initial data & cache ─────
   useEffect(() => {
+    async function initNativeBackground() {
+      if (typeof window !== 'undefined' && Capacitor.isNativePlatform() && BackgroundMode) {
+        try {
+          await BackgroundMode.enable();
+          await BackgroundMode.setSettings({ title: 'Sonix Music', text: 'Playing in background', hidden: true });
+          await BackgroundMode.disableWebViewOptimizations();
+        } catch(e) { console.error('Background audio permissions error:', e); }
+      }
+    }
+    initNativeBackground();
     loadPlaylists();
     loadSongs(1);
     backgroundCache();
@@ -480,7 +497,7 @@ export default function Home() {
                 <button className="hide-mobile" title="Shuffle">🔀</button>
                 <button onClick={(e) => { e.stopPropagation(); handlePrev(); }} title="Previous">⏮</button>
                 <button className="play-pause-btn" onClick={(e) => { e.stopPropagation(); yt.isPlaying ? yt.pause() : yt.play(); }}>
-                  {isLoadingSong ? '⏳' : yt.isPlaying ? '⏸' : '▶'}
+                  {isLoadingSong ? <div className="spinner-small"></div> : yt.isPlaying ? '⏸' : '▶'}
                 </button>
                 <button onClick={(e) => { e.stopPropagation(); handleNext(); }} title="Next">⏭</button>
                 <button className="hide-mobile" title="Repeat">🔁</button>
@@ -582,7 +599,7 @@ export default function Home() {
                   <button className="icon-btn">🔀</button>
                   <button className="icon-btn skip" onClick={handlePrev}>⏮</button>
                   <button className="play-pause-btn-lg" onClick={() => yt.isPlaying ? yt.pause() : yt.play()}>
-                    {isLoadingSong ? '⏳' : yt.isPlaying ? '⏸' : '▶'}
+                    {isLoadingSong ? <div className="spinner-small"></div> : yt.isPlaying ? '⏸' : '▶'}
                   </button>
                   <button className="icon-btn skip" onClick={handleNext}>⏭</button>
                   <button className="icon-btn">🔁</button>
