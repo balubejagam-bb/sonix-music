@@ -321,7 +321,7 @@ export default function Home() {
       <aside className={`sidebar ${mobileMenuOpen ? 'open' : ''}`}>
         <div className="sidebar-logo">
           <div className="logo-icon">🎵</div>
-          <h1>Sonix Music</h1>
+          <h1>Sonix Music <span style={{ fontSize: '11px', background: 'var(--accent-primary)', color: '#fff', padding: '2px 6px', borderRadius: '4px', verticalAlign: 'middle', letterSpacing: '1px', marginLeft: '4px', fontWeight: 'bold' }}>TJ</span></h1>
         </div>
         <nav className="sidebar-nav">
           <div className="nav-section-title">Menu</div>
