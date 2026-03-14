@@ -3,3 +3,8 @@ node_modules/
 android/
 .env*
 .DS_Store
+j17/
+j21/
+jdk17.zip
+.vscode/
+test-*.js

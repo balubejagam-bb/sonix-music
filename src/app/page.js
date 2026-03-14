@@ -17,7 +17,13 @@ if (typeof window !== 'undefined') {
 
 function getMusicControls() {
   if (typeof window === 'undefined') return null;
-  return window.MusicControls || null;
+  try {
+    const mc = window.MusicControls || null;
+    if (mc && typeof mc.subscribe === 'function') return mc;
+    return null;
+  } catch (e) {
+    return null;
+  }
 }
 
 function canUseNativePlugins() {
@@ -514,7 +520,7 @@ export default function Home() {
 
   // ───── Play song (core function) ─────
   async function playSongDirect(song, songList) {
-    if (isLoadingSong) return; // prevent double-clicks
+    if (isLoadingSong) return;
     const key = songKey(song);
     setIsLoadingSong(true);
     setLoadingSongKey(key);
@@ -526,29 +532,63 @@ export default function Home() {
     }
 
     try {
-      const queueSource = songList || queueRef.current || [];
-      if (canPlayNatively(song)) {
+      // On Android: resolve to a direct playable stream URL
+      if (nativeAndroid) {
         try {
-          const nativePayload = buildNativeQueue(queueSource, song);
-          if (nativePayload.queue.length > 0) {
+          let streamUrl = null;
+          let videoId = song.videoId;
+
+          // If song has a JioSaavn/page URL, resolve it to a real stream
+          if (song.url) {
+            const res = await fetch(
+              `/api/stream?url=${encodeURIComponent(song.url)}&title=${encodeURIComponent(song.title || '')}&artist=${encodeURIComponent(song.artist || '')}`
+            );
+            const data = await res.json();
+            if (data.streamUrl) streamUrl = data.streamUrl;
+          }
+
+          // If no stream yet, search YouTube with stream=true
+          if (!streamUrl) {
+            const query = `${song.title || ''} ${song.artist || ''} official audio`.trim();
+            const res = await fetch(`/api/youtube-search?q=${encodeURIComponent(query)}&stream=true`);
+            const data = await res.json();
+            if (data.videoId) videoId = data.videoId;
+            if (data.streamUrl) streamUrl = data.streamUrl;
+          }
+
+          if (streamUrl) {
+            const songWithUrl = { ...song, url: streamUrl, videoId: videoId || song.videoId };
+            const queueSource = songList || queueRef.current || [];
+
             yt.pause();
             await NativeMusicPlayer.playQueue({
-              queue: nativePayload.queue,
-              index: nativePayload.index,
+              queue: [{
+                url: streamUrl,
+                title: song.title || 'Unknown Track',
+                artist: song.artist || 'Unknown Artist',
+                album: song.album || 'Sonix Music',
+                artwork: song.thumbnail || song.image || (videoId ? `https://img.youtube.com/vi/${videoId}/mqdefault.jpg` : ''),
+              }],
+              index: 0,
               shuffle: shuffleEnabled,
               repeatMode,
             });
-            queueRef.current = queueSource.length ? queueSource : [song];
-            queueIndexRef.current = nativePayload.index;
-            setCurrentSong(song);
+
+            queueRef.current = queueSource.length ? queueSource : [songWithUrl];
+            queueIndexRef.current = queueSource.findIndex(s => songKey(s) === key) || 0;
+            setCurrentSong(songWithUrl);
             setNativeIsPlaying(true);
+            setIsLoadingSong(false);
+            setLoadingSongKey(null);
+            prefetchUpcomingVideoIds();
             return;
           }
         } catch (nativeErr) {
-          console.error('Native playback error, using web fallback:', nativeErr);
+          console.error('Native playback error, falling back to web:', nativeErr);
         }
       }
 
+      // Web fallback (browser / non-Android)
       const resolvedVideoId = await resolveSongVideoId(song);
       const playableSong = resolvedVideoId && !song.videoId ? { ...song, videoId: resolvedVideoId } : song;
 
@@ -556,7 +596,6 @@ export default function Home() {
         setCurrentSong(playableSong);
         setNativeIsPlaying(false);
         const started = yt.playVideoById(resolvedVideoId);
-        // If player isn't ready yet, fallback search can still start playback when ready.
         if (!started && yt.ytReady) {
           await yt.searchAndPlay(song.title, song.artist);
         }
@@ -574,10 +613,10 @@ export default function Home() {
           title: playableSong.title,
           artist: playableSong.artist,
           album: playableSong.album || 'Sonix Music',
-          artwork: [{ 
-            src: playableSong.thumbnail || playableSong.image || `https://img.youtube.com/vi/${playableSong.videoId}/mqdefault.jpg`, 
-            sizes: '512x512', 
-            type: 'image/jpeg' 
+          artwork: [{
+            src: playableSong.thumbnail || playableSong.image || `https://img.youtube.com/vi/${playableSong.videoId}/mqdefault.jpg`,
+            sizes: '512x512',
+            type: 'image/jpeg'
           }]
         });
         navigator.mediaSession.setActionHandler('play', () => yt.play());
@@ -621,13 +660,7 @@ export default function Home() {
     if (q.length === 0) return;
     const nextIdx = (queueIndexRef.current + 1) % q.length;
     queueIndexRef.current = nextIdx;
-    if (nativeAndroid && canPlayNatively(q[nextIdx])) {
-      setCurrentSong(q[nextIdx]);
-      setNativeIsPlaying(true);
-      NativeMusicPlayer.next().catch((e) => console.error('Native next failed:', e));
-      return;
-    }
-    playSongDirect(q[nextIdx], null); // null = don't reset queue
+    playSongDirect(q[nextIdx], null);
   }
 
   function handlePrev() {
@@ -635,12 +668,6 @@ export default function Home() {
     if (q.length === 0) return;
     const prevIdx = queueIndexRef.current <= 0 ? q.length - 1 : queueIndexRef.current - 1;
     queueIndexRef.current = prevIdx;
-    if (nativeAndroid && canPlayNatively(q[prevIdx])) {
-      setCurrentSong(q[prevIdx]);
-      setNativeIsPlaying(true);
-      NativeMusicPlayer.previous().catch((e) => console.error('Native previous failed:', e));
-      return;
-    }
     playSongDirect(q[prevIdx], null);
   }
 

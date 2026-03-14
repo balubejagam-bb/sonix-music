@@ -1,12 +1,15 @@
 package com.sonix.music;
 
+import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.Intent;
 import android.os.Build;
 import android.text.TextUtils;
 
 import androidx.annotation.Nullable;
+import androidx.core.app.NotificationCompat;
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
@@ -36,6 +39,7 @@ public class MusicPlaybackService extends MediaSessionService {
     public static final String ACTION_SET_REPEAT = "com.sonix.music.action.SET_REPEAT";
 
     private static final String CHANNEL_ID = "sonix_music_playback";
+    private static final int NOTIFICATION_ID = 1001;
 
     private ExoPlayer player;
     private MediaSession mediaSession;
@@ -54,12 +58,19 @@ public class MusicPlaybackService extends MediaSessionService {
         player.setAudioAttributes(audioAttributes, true);
         player.setHandleAudioBecomingNoisy(true);
         player.setWakeMode(C.WAKE_MODE_NETWORK);
+        
         player.addListener(new Player.Listener() {
             @Override
             public void onPlaybackStateChanged(int playbackState) {
+                updateNotification();
                 if (playbackState == Player.STATE_ENDED && !player.hasNextMediaItem()) {
-                    stopSelf();
+                    stopForeground(false);
                 }
+            }
+
+            @Override
+            public void onIsPlayingChanged(boolean isPlaying) {
+                updateNotification();
             }
         });
 
@@ -68,6 +79,7 @@ public class MusicPlaybackService extends MediaSessionService {
 
     @Override
     public int onStartCommand(@Nullable Intent intent, int flags, int startId) {
+        startForeground(NOTIFICATION_ID, createNotification("Sonix Music", "Loading..."));
         handleAction(intent);
         return START_STICKY;
     }
@@ -87,51 +99,56 @@ public class MusicPlaybackService extends MediaSessionService {
             return;
         }
 
-        switch (action) {
-            case ACTION_PLAY_SINGLE:
-                playSingle(intent);
-                break;
-            case ACTION_PLAY_QUEUE:
-                playQueue(intent);
-                break;
-            case ACTION_PAUSE:
-                player.pause();
-                break;
-            case ACTION_RESUME:
-                player.play();
-                break;
-            case ACTION_STOP:
-                player.stop();
-                stopSelf();
-                break;
-            case ACTION_NEXT:
-                if (player.hasNextMediaItem()) {
-                    player.seekToNextMediaItem();
+        try {
+            switch (action) {
+                case ACTION_PLAY_SINGLE:
+                    playSingle(intent);
+                    break;
+                case ACTION_PLAY_QUEUE:
+                    playQueue(intent);
+                    break;
+                case ACTION_PAUSE:
+                    player.pause();
+                    break;
+                case ACTION_RESUME:
                     player.play();
-                }
-                break;
-            case ACTION_PREVIOUS:
-                if (player.hasPreviousMediaItem()) {
-                    player.seekToPreviousMediaItem();
-                    player.play();
-                } else {
-                    player.seekToDefaultPosition(0);
-                    player.play();
-                }
-                break;
-            case ACTION_SEEK:
-                long positionMs = Math.max(0L, intent.getLongExtra("positionMs", 0L));
-                player.seekTo(positionMs);
-                break;
-            case ACTION_SET_SHUFFLE:
-                player.setShuffleModeEnabled(intent.getBooleanExtra("enabled", false));
-                break;
-            case ACTION_SET_REPEAT:
-                String mode = intent.getStringExtra("repeatMode");
-                player.setRepeatMode(mapRepeatMode(mode));
-                break;
-            default:
-                break;
+                    break;
+                case ACTION_STOP:
+                    player.stop();
+                    stopForeground(true);
+                    stopSelf();
+                    break;
+                case ACTION_NEXT:
+                    if (player.hasNextMediaItem()) {
+                        player.seekToNextMediaItem();
+                        player.play();
+                    }
+                    break;
+                case ACTION_PREVIOUS:
+                    if (player.hasPreviousMediaItem()) {
+                        player.seekToPreviousMediaItem();
+                        player.play();
+                    } else {
+                        player.seekToDefaultPosition(0);
+                        player.play();
+                    }
+                    break;
+                case ACTION_SEEK:
+                    long positionMs = Math.max(0L, intent.getLongExtra("positionMs", 0L));
+                    player.seekTo(positionMs);
+                    break;
+                case ACTION_SET_SHUFFLE:
+                    player.setShuffleModeEnabled(intent.getBooleanExtra("enabled", false));
+                    break;
+                case ACTION_SET_REPEAT:
+                    String mode = intent.getStringExtra("repeatMode");
+                    player.setRepeatMode(mapRepeatMode(mode));
+                    break;
+                default:
+                    break;
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
         }
     }
 
@@ -140,16 +157,23 @@ public class MusicPlaybackService extends MediaSessionService {
         if (TextUtils.isEmpty(url)) {
             return;
         }
+        
+        String title = intent.getStringExtra("title");
+        String artist = intent.getStringExtra("artist");
+        
         MediaItem item = buildItem(
             url,
-            intent.getStringExtra("title"),
-            intent.getStringExtra("artist"),
+            title,
+            artist,
             intent.getStringExtra("album"),
             intent.getStringExtra("artwork")
         );
+        
         player.setMediaItem(item);
         player.prepare();
         player.play();
+        
+        updateNotification(title, artist);
     }
 
     private void playQueue(Intent intent) {
@@ -179,7 +203,8 @@ public class MusicPlaybackService extends MediaSessionService {
                     obj.optString("artwork", "")
                 ));
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            e.printStackTrace();
             return;
         }
 
@@ -196,16 +221,22 @@ public class MusicPlaybackService extends MediaSessionService {
         player.setMediaItems(items, index, C.TIME_UNSET);
         player.prepare();
         player.play();
+        
+        updateNotification();
     }
 
     private MediaItem buildItem(String url, String title, String artist, String album, String artwork) {
         MediaMetadata.Builder metaBuilder = new MediaMetadata.Builder()
-            .setTitle(title)
-            .setArtist(artist)
-            .setAlbumTitle(album);
+            .setTitle(title != null ? title : "Unknown Track")
+            .setArtist(artist != null ? artist : "Unknown Artist")
+            .setAlbumTitle(album != null ? album : "Sonix Music");
 
         if (!TextUtils.isEmpty(artwork)) {
-            metaBuilder.setArtworkUri(android.net.Uri.parse(artwork));
+            try {
+                metaBuilder.setArtworkUri(android.net.Uri.parse(artwork));
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
         }
 
         return new MediaItem.Builder()
@@ -237,7 +268,70 @@ public class MusicPlaybackService extends MediaSessionService {
             "Sonix Music Playback",
             NotificationManager.IMPORTANCE_LOW
         );
+        channel.setDescription("Music playback controls");
+        channel.setShowBadge(false);
         manager.createNotificationChannel(channel);
+    }
+
+    private void updateNotification() {
+        if (player != null && player.getCurrentMediaItem() != null) {
+            MediaMetadata metadata = player.getCurrentMediaItem().mediaMetadata;
+            String title = metadata.title != null ? metadata.title.toString() : "Sonix Music";
+            String artist = metadata.artist != null ? metadata.artist.toString() : "Now Playing";
+            updateNotification(title, artist);
+        }
+    }
+
+    private void updateNotification(String title, String artist) {
+        Notification notification = createNotification(title, artist);
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager != null) {
+            manager.notify(NOTIFICATION_ID, notification);
+        }
+    }
+
+    private Notification createNotification(String title, String text) {
+        Intent notificationIntent = new Intent(this, MainActivity.class);
+        PendingIntent pendingIntent = PendingIntent.getActivity(
+            this, 
+            0, 
+            notificationIntent, 
+            PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
+        );
+
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .setShowWhen(false)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC);
+
+        if (player != null && player.isPlaying()) {
+            builder.addAction(android.R.drawable.ic_media_pause, "Pause", 
+                createActionIntent(ACTION_PAUSE));
+        } else {
+            builder.addAction(android.R.drawable.ic_media_play, "Play", 
+                createActionIntent(ACTION_RESUME));
+        }
+
+        builder.addAction(android.R.drawable.ic_media_next, "Next", 
+            createActionIntent(ACTION_NEXT));
+
+        return builder.build();
+    }
+
+    private PendingIntent createActionIntent(String action) {
+        Intent intent = new Intent(this, MusicPlaybackService.class);
+        intent.setAction(action);
+        return PendingIntent.getService(
+            this, 
+            action.hashCode(), 
+            intent, 
+            PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
+        );
     }
 
     @Override

@@ -37,17 +37,13 @@ async function searchWithInvidious(query, multi = false) {
         headers: { 'Accept': 'application/json' }
       });
       if (!res.ok) return null;
-
       const data = await res.json();
       if (!Array.isArray(data) || !data.length) return null;
-
       const videos = data.filter((item) => item.type === 'video' && item.videoId);
       if (!videos.length) return null;
-
       if (multi) {
         return videos.slice(0, 10).map((v) => mapVideo(v.videoId, v.title, v.author, v.videoThumbnails?.[0]?.url));
       }
-
       const first = videos[0];
       return mapVideo(first.videoId, first.title, first.author, first.videoThumbnails?.[0]?.url);
     } catch {
@@ -56,10 +52,8 @@ async function searchWithInvidious(query, multi = false) {
   });
 
   const settled = await Promise.allSettled(calls);
-
   if (multi) {
-    const merged = [];
-    const seen = new Set();
+    const merged = [], seen = new Set();
     for (const result of settled) {
       if (result.status !== 'fulfilled' || !Array.isArray(result.value)) continue;
       for (const item of result.value) {
@@ -70,20 +64,15 @@ async function searchWithInvidious(query, multi = false) {
     }
     return merged.length ? merged : null;
   }
-
   for (const result of settled) {
-    if (result.status === 'fulfilled' && result.value?.videoId) {
-      return result.value;
-    }
+    if (result.status === 'fulfilled' && result.value?.videoId) return result.value;
   }
-
   return null;
 }
 
 async function searchWithPiped(query, multi = false) {
   const filters = ['music_songs', 'videos'];
   const calls = [];
-
   for (const instance of PIPED_INSTANCES.slice(0, 4)) {
     for (const filter of filters) {
       calls.push((async () => {
@@ -91,18 +80,15 @@ async function searchWithPiped(query, multi = false) {
           const url = `${instance}/search?q=${encodeURIComponent(query)}&filter=${filter}`;
           const res = await fetch(url, { signal: AbortSignal.timeout(2500) });
           if (!res.ok) return null;
-
           const data = await res.json();
           const items = (data.items || data || []).filter((i) => i?.url?.includes('/watch'));
           if (!items.length) return null;
-
           if (multi) {
             return items.slice(0, 10).map((i) => {
               const videoId = i.url.split('v=')[1]?.split('&')[0];
               return videoId ? mapVideo(videoId, i.title, i.uploaderName || i.uploader, i.thumbnail) : null;
             }).filter(Boolean);
           }
-
           const first = items[0];
           const videoId = first.url.split('v=')[1]?.split('&')[0];
           if (!videoId) return null;
@@ -113,12 +99,9 @@ async function searchWithPiped(query, multi = false) {
       })());
     }
   }
-
   const settled = await Promise.allSettled(calls);
-
   if (multi) {
-    const merged = [];
-    const seen = new Set();
+    const merged = [], seen = new Set();
     for (const result of settled) {
       if (result.status !== 'fulfilled' || !Array.isArray(result.value)) continue;
       for (const item of result.value) {
@@ -129,13 +112,9 @@ async function searchWithPiped(query, multi = false) {
     }
     return merged.length ? merged : null;
   }
-
   for (const result of settled) {
-    if (result.status === 'fulfilled' && result.value?.videoId) {
-      return result.value;
-    }
+    if (result.status === 'fulfilled' && result.value?.videoId) return result.value;
   }
-
   return null;
 }
 
@@ -150,37 +129,70 @@ async function searchWithYTScrape(query) {
       }
     });
     if (!res.ok) return null;
-
     const html = await res.text();
     const videoIdMatch = html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
     if (!videoIdMatch) return null;
-
     return mapVideo(videoIdMatch[1], '', '', `https://img.youtube.com/vi/${videoIdMatch[1]}/mqdefault.jpg`);
   } catch {
     return null;
   }
 }
 
+// Get direct audio stream URL from Invidious/Piped for native Android playback
+async function getStreamUrl(videoId) {
+  // Try Invidious first
+  for (const instance of INVIDIOUS_INSTANCES) {
+    try {
+      const res = await fetch(`${instance}/api/v1/videos/${videoId}?fields=adaptiveFormats`, {
+        signal: AbortSignal.timeout(4000),
+        headers: { 'Accept': 'application/json' }
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const audioFormats = (data.adaptiveFormats || [])
+        .filter(f => f.type?.includes('audio') && f.url)
+        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+      if (audioFormats.length > 0) return audioFormats[0].url;
+    } catch { continue; }
+  }
+
+  // Try Piped
+  for (const instance of PIPED_INSTANCES) {
+    try {
+      const res = await fetch(`${instance}/streams/${videoId}`, {
+        signal: AbortSignal.timeout(4000)
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (data.audioStreams?.length > 0) {
+        const best = data.audioStreams.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+        return best.url;
+      }
+    } catch { continue; }
+  }
+
+  return null;
+}
+
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const q = searchParams.get('q') || '';
   const multi = searchParams.get('multi') === 'true';
+  const withStream = searchParams.get('stream') === 'true'; // new: get stream URL too
 
   if (!q) {
     return NextResponse.json({ error: 'Missing query' }, { status: 400 });
   }
 
-  // Try all methods in parallel for speed
   try {
     const [invidiousResult, pipedResult, scrapeResult] = await Promise.allSettled([
       searchWithInvidious(q, multi),
       searchWithPiped(q, multi),
-      searchWithYTScrape(q), 
+      searchWithYTScrape(q),
     ]);
 
     if (multi) {
-      const results = [];
-      const seen = new Set();
+      const results = [], seen = new Set();
       [invidiousResult, pipedResult].forEach((res) => {
         if (res.status !== 'fulfilled' || !Array.isArray(res.value)) return;
         res.value.forEach((v) => {
@@ -192,26 +204,33 @@ export async function GET(request) {
       return NextResponse.json({ results: results.slice(0, 15) });
     }
 
-    // Return the first valid videoId
+    let found = null;
     for (const result of [invidiousResult, pipedResult, scrapeResult]) {
       if (result.status === 'fulfilled' && result.value?.videoId) {
-        return NextResponse.json(result.value);
+        found = result.value;
+        break;
       }
     }
 
-    // Last resort scrape retry
-    const simpleQ = q.replace(/official audio|official|audio|full song/gi, '').trim();
-    if (simpleQ !== q) {
-      const retryResult = await searchWithYTScrape(simpleQ);
-      if (retryResult?.videoId) {
-        return NextResponse.json(retryResult);
+    if (!found) {
+      const simpleQ = q.replace(/official audio|official|audio|full song/gi, '').trim();
+      if (simpleQ !== q) {
+        const retryResult = await searchWithYTScrape(simpleQ);
+        if (retryResult?.videoId) found = retryResult;
       }
     }
 
-    if (multi) {
-      return NextResponse.json({ results: [] });
+    if (!found) {
+      return NextResponse.json({ videoId: null, error: 'No results found' });
     }
-    return NextResponse.json({ videoId: null, error: 'No results found' });
+
+    // If Android native player requested stream URL, fetch it in parallel
+    if (withStream && found.videoId) {
+      const streamUrl = await getStreamUrl(found.videoId);
+      return NextResponse.json({ ...found, streamUrl: streamUrl || null });
+    }
+
+    return NextResponse.json(found);
   } catch (err) {
     console.error('Final search crash:', err);
     return NextResponse.json({ error: 'Search Engine Error', details: err.message }, { status: 500 });
