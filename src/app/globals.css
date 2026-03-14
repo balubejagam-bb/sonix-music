@@ -70,10 +70,11 @@ html, body {
 }
 
 .sidebar-logo {
-  padding: 24px 20px;
+  padding: 20px 18px 14px;
   display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: space-between;
+  gap: 10px;
   border-bottom: 1px solid var(--border-glass);
 }
 
@@ -97,6 +98,45 @@ html, body {
   background-clip: text;
   -webkit-text-fill-color: transparent;
   letter-spacing: -0.5px;
+}
+
+.sidebar-brand {
+  margin: 0;
+  background: linear-gradient(135deg, #a78bfa 0%, #f472b6 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: #a78bfa;
+  font-size: 1.45rem;
+  font-weight: 900;
+  letter-spacing: -0.4px;
+  line-height: 1.1;
+  text-shadow: 0 0 20px rgba(167, 139, 250, 0.25);
+}
+
+.sidebar-brand-tag {
+  -webkit-text-fill-color: #fff;
+  font-size: 0.85rem;
+  vertical-align: middle;
+  margin-left: 4px;
+}
+
+.sidebar-close-btn {
+  display: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid var(--border-glass);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 16px;
+  align-items: center;
+  justify-content: center;
+}
+
+.sidebar-close-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .sidebar-nav {
@@ -145,6 +185,26 @@ html, body {
   font-size: 18px;
   width: 24px;
   text-align: center;
+}
+
+.developer-item {
+  background: var(--accent-glow);
+  border: 1px solid var(--accent-primary);
+  margin-top: 10px;
+  color: #fff;
+  box-shadow: 0 4px 15px rgba(167, 139, 250, 0.2);
+}
+
+.developer-note {
+  padding: 0 14px;
+  font-size: 11px;
+  color: #7b8192;
+  margin-top: 8px;
+  line-height: 1.4;
+}
+
+.sidebar-bottom-space {
+  height: 20px;
 }
 
 /* Main Content */
@@ -715,8 +775,8 @@ html, body {
 .mobile-menu-btn {
   display: none;
   position: fixed;
-  top: 16px;
-  left: 16px;
+  top: 12px;
+  left: 12px;
   z-index: 200;
   width: 40px;
   height: 40px;
@@ -729,6 +789,11 @@ html, body {
   cursor: pointer;
   align-items: center;
   justify-content: center;
+}
+
+.mobile-menu-btn.hidden {
+  opacity: 0;
+  pointer-events: none;
 }
 
 /* Mobile Overlay */
@@ -767,11 +832,16 @@ html, body {
     height: 100vh;
     transition: left 0.3s ease;
     box-shadow: none;
+    overflow-y: auto;
   }
 
   .sidebar.open {
     left: 0;
     box-shadow: 4px 0 30px rgba(0, 0, 0, 0.5);
+  }
+
+  .sidebar-close-btn {
+    display: inline-flex;
   }
 
   .mobile-overlay {
@@ -969,7 +1039,7 @@ html, body {
 
 /* Cache indicator */
 .cache-badge {
-  display: inline-flex;
+  display: none !important;
   align-items: center;
   padding: 6px 14px;
   border-radius: 50px;

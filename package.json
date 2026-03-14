@@ -6,18 +6,24 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "seed": "node scripts/seed.js"
+    "seed": "node scripts/seed.js",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "@anuradev/capacitor-background-mode": "^7.2.1",
     "@capacitor/android": "^8.2.0",
     "@capacitor/cli": "^8.2.0",
     "@capacitor/core": "^8.2.0",
+    "@capacitor/local-notifications": "^8.0.2",
     "@distube/ytdl-core": "^4.16.12",
+    "cordova-plugin-music-controls2": "^3.0.7",
     "csv-parse": "^5.5.0",
     "mongodb": "^6.3.0",
     "next": "^14.2.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "patch-package": "^8.0.1"
   }
 }

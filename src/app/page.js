@@ -9,6 +9,11 @@ if (typeof window !== 'undefined') {
   import('@anuradev/capacitor-background-mode').then(m => { BackgroundMode = m.BackgroundMode; }).catch(()=> {});
 }
 
+function getMusicControls() {
+  if (typeof window === 'undefined') return null;
+  return window.MusicControls || null;
+}
+
 // ─────────────────────── YOUTUBE AUDIO ENGINE ───────────────────────
 function useYouTubePlayer() {
   const playerRef = useRef(null);
@@ -112,7 +117,6 @@ export default function Home() {
   const [currentSong, setCurrentSong] = useState(null);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
-  const [cacheStatus, setCacheStatus] = useState('loading');
   const [totalSongs, setTotalSongs] = useState(0);
   const [page, setPage] = useState(1);
   const [view, setView] = useState('home');
@@ -134,15 +138,24 @@ export default function Home() {
   // Use refs for queue to avoid stale closures in next/prev
   const queueRef = useRef([]);
   const queueIndexRef = useRef(0);
+  const videoIdCacheRef = useRef(new Map());
+  const pendingVideoIdRef = useRef(new Map());
+  const controlsBoundRef = useRef(false);
 
   // ───── Load initial data & cache ─────
   useEffect(() => {
     async function initNativeBackground() {
       if (typeof window !== 'undefined' && Capacitor.isNativePlatform() && BackgroundMode) {
         try {
+          await BackgroundMode.requestNotificationsPermission();
           await BackgroundMode.enable();
-          await BackgroundMode.setSettings({ title: 'Sonix Music', text: 'Playing in background', hidden: true });
+          await BackgroundMode.setSettings({ title: 'Sonix Music', text: 'Playing in background', hidden: false });
           await BackgroundMode.disableWebViewOptimizations();
+
+          const battery = await BackgroundMode.checkBatteryOptimizations();
+          if (!battery.enabled) {
+            await BackgroundMode.requestDisableBatteryOptimizations();
+          }
         } catch(e) { console.error('Background audio permissions error:', e); }
       }
     }
@@ -151,6 +164,77 @@ export default function Home() {
     loadSongs(1);
     backgroundCache();
   }, []);
+
+  function bindNativeMediaControls() {
+    if (!Capacitor.isNativePlatform() || controlsBoundRef.current) return;
+    const controls = getMusicControls();
+    if (!controls) return;
+
+    controls.subscribe((action) => {
+      try {
+        const payload = typeof action === 'string' ? JSON.parse(action) : action;
+        const message = payload?.message;
+
+        switch (message) {
+          case 'music-controls-next':
+          case 'music-controls-media-button-next':
+            handleNext();
+            break;
+          case 'music-controls-previous':
+          case 'music-controls-media-button-previous':
+            handlePrev();
+            break;
+          case 'music-controls-play':
+          case 'music-controls-media-button-play':
+            yt.play();
+            break;
+          case 'music-controls-pause':
+          case 'music-controls-media-button-pause':
+            yt.pause();
+            break;
+          case 'music-controls-toggle-play-pause':
+          case 'music-controls-media-button-play-pause':
+            if (yt.isPlaying) yt.pause();
+            else yt.play();
+            break;
+          case 'music-controls-destroy':
+            yt.pause();
+            break;
+          default:
+            break;
+        }
+      } catch (e) {
+        console.error('MusicControls event error:', e);
+      }
+    });
+    controls.listen();
+    controlsBoundRef.current = true;
+  }
+
+  function syncNativeMediaControls(song, playing) {
+    if (!Capacitor.isNativePlatform() || !song) return;
+    const controls = getMusicControls();
+    if (!controls) return;
+
+    const cover = song.thumbnail || song.image || (song.videoId ? `https://img.youtube.com/vi/${song.videoId}/mqdefault.jpg` : '');
+    controls.create({
+      track: song.title || 'Unknown Track',
+      artist: song.artist || 'Unknown Artist',
+      album: song.album || 'Sonix Music',
+      cover,
+      isPlaying: !!playing,
+      dismissable: true,
+      hasPrev: true,
+      hasNext: true,
+      hasClose: true,
+      ticker: song.title || 'Sonix Music',
+      notificationIcon: 'notification'
+    }, () => {}, (err) => {
+      console.error('MusicControls create error:', err);
+    });
+
+    controls.updateIsPlaying(!!playing);
+  }
 
   async function loadPlaylists() {
     try {
@@ -179,21 +263,78 @@ export default function Home() {
     setLoading(false);
   }
 
+  function songKey(song) {
+    return song.songId || song._id || song.videoId || `${song.title || ''}::${song.artist || ''}`;
+  }
+
+  async function resolveSongVideoId(song) {
+    if (!song) return null;
+    if (song.videoId) {
+      videoIdCacheRef.current.set(songKey(song), song.videoId);
+      return song.videoId;
+    }
+
+    const key = songKey(song);
+    const cachedVideoId = videoIdCacheRef.current.get(key);
+    if (cachedVideoId) return cachedVideoId;
+
+    if (pendingVideoIdRef.current.has(key)) {
+      return pendingVideoIdRef.current.get(key);
+    }
+
+    const query = `${song.title || ''} ${song.artist || ''} official audio`.trim();
+    const task = fetch(`/api/youtube-search?q=${encodeURIComponent(query)}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data?.videoId) {
+          videoIdCacheRef.current.set(key, data.videoId);
+          return data.videoId;
+        }
+        return null;
+      })
+      .catch(() => null)
+      .finally(() => {
+        pendingVideoIdRef.current.delete(key);
+      });
+
+    pendingVideoIdRef.current.set(key, task);
+    return task;
+  }
+
+  function prefetchUpcomingVideoIds() {
+    const q = queueRef.current;
+    if (!q.length) return;
+
+    for (let step = 1; step <= 3; step++) {
+      const idx = (queueIndexRef.current + step) % q.length;
+      const nextSong = q[idx];
+      if (!nextSong) continue;
+      resolveSongVideoId(nextSong).catch(() => {});
+    }
+  }
+
   async function backgroundCache() {
-    setCacheStatus('loading');
     try {
-      const res = await fetch('/api/songs?limit=2500'); // Limited for deployment performance
+      const res = await fetch('/api/songs?all=true');
       const data = await res.json();
-      setCachedSongs(data.songs || []);
+      const allSongs = data.songs || [];
+      setCachedSongs(allSongs);
+
+      // Warm videoId cache so next/prev is instant for already indexed songs.
+      allSongs.forEach((song) => {
+        if (song?.videoId) {
+          videoIdCacheRef.current.set(songKey(song), song.videoId);
+        }
+      });
+
       try {
-        localStorage.setItem('sonix_cache', JSON.stringify(data.songs?.slice(0, 2500) || []));
+        localStorage.setItem('sonix_cache', JSON.stringify(allSongs.slice(0, 2500)));
         localStorage.setItem('sonix_cache_time', Date.now().toString());
       } catch(e) {}
-      setCacheStatus('ready');
     } catch (e) {
       try {
         const cached = localStorage.getItem('sonix_cache');
-        if (cached) { setCachedSongs(JSON.parse(cached)); setCacheStatus('ready'); }
+        if (cached) { setCachedSongs(JSON.parse(cached)); }
       } catch(e2) {}
     }
   }
@@ -234,7 +375,6 @@ export default function Home() {
   async function playSongDirect(song, songList) {
     if (isLoadingSong) return; // prevent double-clicks
     setIsLoadingSong(true);
-    setCurrentSong(song);
 
     if (songList) {
       const idx = songList.findIndex(s => (s.songId || s.videoId) === (song.songId || song.videoId));
@@ -243,21 +383,27 @@ export default function Home() {
     }
 
     try {
-      if (song.videoId) {
-        yt.playVideoById(song.videoId);
+      const resolvedVideoId = await resolveSongVideoId(song);
+      const playableSong = resolvedVideoId && !song.videoId ? { ...song, videoId: resolvedVideoId } : song;
+
+      if (resolvedVideoId) {
+        setCurrentSong(playableSong);
+        yt.playVideoById(resolvedVideoId);
       } else {
+        setCurrentSong(song);
         await yt.searchAndPlay(song.title, song.artist);
       }
-      
+
+      prefetchUpcomingVideoIds();
       setIsLoadingSong(false);
 
       if ('mediaSession' in navigator) {
         navigator.mediaSession.metadata = new MediaMetadata({
-          title: song.title,
-          artist: song.artist,
-          album: song.album || 'Sonix Music',
+          title: playableSong.title,
+          artist: playableSong.artist,
+          album: playableSong.album || 'Sonix Music',
           artwork: [{ 
-            src: song.thumbnail || song.image || `https://img.youtube.com/vi/${song.videoId}/mqdefault.jpg`, 
+            src: playableSong.thumbnail || playableSong.image || `https://img.youtube.com/vi/${playableSong.videoId}/mqdefault.jpg`, 
             sizes: '512x512', 
             type: 'image/jpeg' 
           }]
@@ -267,11 +413,19 @@ export default function Home() {
         navigator.mediaSession.setActionHandler('previoustrack', () => handlePrev());
         navigator.mediaSession.setActionHandler('nexttrack', () => handleNext());
       }
+
+      bindNativeMediaControls();
+      syncNativeMediaControls(playableSong, true);
     } catch (e) {
       console.error('Playback error:', e);
       setIsLoadingSong(false);
     }
   }
+
+  useEffect(() => {
+    if (!currentSong) return;
+    syncNativeMediaControls(currentSong, yt.isPlaying);
+  }, [currentSong, yt.isPlaying]);
 
   // ───── Next / Prev using refs (never stale) ─────
   function handleNext() {
@@ -336,27 +490,27 @@ export default function Home() {
   return (
     <div className="app-layout">
       {/* Mobile Menu Toggle */}
-      <button className="mobile-menu-btn" onClick={() => setMobileMenuOpen(!mobileMenuOpen)}>
-        {mobileMenuOpen ? '✕' : '☰'}
+      <button
+        className={`mobile-menu-btn ${mobileMenuOpen ? 'hidden' : ''}`}
+        onClick={() => setMobileMenuOpen(true)}
+        aria-label="Open menu"
+      >
+        ☰
       </button>
 
       {/* Sidebar */}
       <aside className={`sidebar ${mobileMenuOpen ? 'open' : ''}`}>
-        <div className="sidebar-logo" style={{ border: 'none', padding: '24px 20px 15px' }}>
-          <h1 style={{ 
-            background: 'linear-gradient(135deg, #a78bfa 0%, #f472b6 100%)', 
-            WebkitBackgroundClip: 'text', 
-            backgroundClip: 'text', 
-            WebkitTextFillColor: 'transparent', 
-            color: '#a78bfa', 
-            fontSize: '1.5rem',
-            fontWeight: '900',
-            letterSpacing: '-0.5px',
-            textShadow: '0 0 20px rgba(167, 139, 250, 0.3)',
-            filter: 'drop-shadow(0 2px 2px rgba(0,0,0,0.5))'
-          }}>
-            SONIX MUSIC <span style={{ WebkitTextFillColor: '#fff', fontSize: '0.9rem', verticalAlign: 'middle', marginLeft: '5px' }}>-TJ</span>
+        <div className="sidebar-logo">
+          <h1 className="sidebar-brand">
+            SONIX MUSIC <span className="sidebar-brand-tag">-TJ</span>
           </h1>
+          <button
+            className="sidebar-close-btn"
+            onClick={() => setMobileMenuOpen(false)}
+            aria-label="Close menu"
+          >
+            ✕
+          </button>
         </div>
         <nav className="sidebar-nav">
           <div className="nav-section-title">Menu</div>
@@ -387,11 +541,14 @@ export default function Home() {
           ))}
 
           <div className="nav-section-title">Developer Studio</div>
-          <button className="nav-item developer-item" onClick={() => document.getElementById('music-upload-input').click()} style={{ background: 'rgba(255,255,255,0.05)', border: '1px dashed rgba(255,255,255,0.2)', marginTop: '4px' }}>
-            <span className="icon">🚀</span> <b>Upload & Sync Library</b>
+          <button className="nav-item developer-item" onClick={() => document.getElementById('music-upload-input').click()}>
+            <span className="icon">🚀</span> <b>Upload & Sync Database</b>
           </button>
-          
-          <div style={{ height: '200px' }}></div> {/* Increased safe area */}
+          <div className="developer-note">
+            Index MP3/CSV metadata directly into the Global Sonix Library.
+          </div>
+
+          <div className="sidebar-bottom-space" aria-hidden="true"></div>
 
           {/* Hidden File Input */}
           <input 
@@ -451,10 +608,6 @@ export default function Home() {
             {search && (
               <button style={{ background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer', fontSize: '16px' }} onClick={() => setSearch('')}>✕</button>
             )}
-          </div>
-          {/* Cache indicator moved to top bar */}
-          <div className={`cache-badge ${cacheStatus}`}>
-            {cacheStatus === 'loading' ? '⏳ Caching...' : `✅ ${cachedSongs.length.toLocaleString()} cached`}
           </div>
         </div>
 
