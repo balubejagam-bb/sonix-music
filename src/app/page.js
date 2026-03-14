@@ -14,6 +14,12 @@ function getMusicControls() {
   return window.MusicControls || null;
 }
 
+function canUseNativePlugins() {
+  // Some Android devices/ROMs crash inside native media/background plugins.
+  // Keep playback on the stable web path unless explicitly enabled later.
+  return Capacitor.isNativePlatform() && Capacitor.getPlatform() !== 'android';
+}
+
 // ─────────────────────── YOUTUBE AUDIO ENGINE ───────────────────────
 function useYouTubePlayer() {
   const playerRef = useRef(null);
@@ -166,7 +172,7 @@ export default function Home() {
   // ───── Load initial data & cache ─────
   useEffect(() => {
     async function initNativeBackground() {
-      if (typeof window !== 'undefined' && Capacitor.isNativePlatform() && BackgroundMode) {
+      if (typeof window !== 'undefined' && canUseNativePlugins() && BackgroundMode) {
         try {
           await BackgroundMode.requestNotificationsPermission();
           await BackgroundMode.enable();
@@ -183,7 +189,7 @@ export default function Home() {
     initNativeBackground();
 
     const onVisibilityChange = async () => {
-      if (!Capacitor.isNativePlatform() || !BackgroundMode) return;
+      if (!canUseNativePlugins() || !BackgroundMode) return;
       if (!document.hidden) return;
       try {
         await BackgroundMode.enable();
@@ -228,7 +234,7 @@ export default function Home() {
   }
 
   function bindNativeMediaControls() {
-    if (!Capacitor.isNativePlatform() || controlsBoundRef.current || !nativeControlsEnabledRef.current) return;
+    if (!canUseNativePlugins() || controlsBoundRef.current || !nativeControlsEnabledRef.current) return;
     const controls = getMusicControls();
     if (!controls || typeof controls.subscribe !== 'function' || typeof controls.listen !== 'function') {
       nativeControlsEnabledRef.current = false;
@@ -291,7 +297,7 @@ export default function Home() {
   }
 
   function syncNativeMediaControls(song, playing) {
-    if (!Capacitor.isNativePlatform() || !song || !nativeControlsEnabledRef.current) return;
+    if (!canUseNativePlugins() || !song || !nativeControlsEnabledRef.current) return;
     const controls = getMusicControls();
     if (!controls) return;
 
@@ -529,7 +535,7 @@ export default function Home() {
 
   useEffect(() => {
     return () => {
-      if (!Capacitor.isNativePlatform()) return;
+      if (!canUseNativePlugins()) return;
       const controls = getMusicControls();
       if (controls && typeof controls.destroy === 'function') {
         try {
