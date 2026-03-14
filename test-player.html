@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sonix Music - Audio Engine Test</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { 
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #0a0a1a; color: #fff; 
+      display: flex; flex-direction: column; align-items: center; 
+      padding: 40px; min-height: 100vh;
+    }
+    h1 { margin-bottom: 10px; background: linear-gradient(135deg, #667eea, #764ba2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-size: 2rem; }
+    h2 { font-size: 1rem; color: #888; margin-bottom: 30px; }
+    .test-card {
+      background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 16px; padding: 24px; margin: 10px; width: 600px; max-width: 95vw;
+    }
+    .test-card h3 { color: #a78bfa; margin-bottom: 12px; }
+    .test-card p { color: #9ca3af; font-size: 14px; margin-bottom: 16px; }
+    .song-item {
+      display: flex; align-items: center; gap: 12px; padding: 12px;
+      background: rgba(255,255,255,0.03); border-radius: 10px; margin: 8px 0;
+      cursor: pointer; transition: all 0.3s;
+    }
+    .song-item:hover { background: rgba(103,126,234,0.15); transform: translateX(4px); }
+    .song-item img { width: 48px; height: 48px; border-radius: 8px; object-fit: cover; }
+    .song-info { flex: 1; }
+    .song-info .title { font-weight: 600; font-size: 14px; }
+    .song-info .artist { font-size: 12px; color: #9ca3af; }
+    .play-btn { 
+      width: 36px; height: 36px; border-radius: 50%; border: none;
+      background: linear-gradient(135deg, #667eea, #764ba2); color: #fff;
+      font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+    }
+    .status { 
+      padding: 16px; border-radius: 10px; margin-top: 20px;
+      background: rgba(74,222,128,0.1); border: 1px solid rgba(74,222,128,0.3);
+      font-size: 13px; color: #4ade80;
+    }
+    .status.error { background: rgba(248,113,113,0.1); border-color: rgba(248,113,113,0.3); color: #f87171; }
+    .status.loading { background: rgba(250,204,21,0.1); border-color: rgba(250,204,21,0.3); color: #facc15; }
+    #player-container { width: 1px; height: 1px; overflow: hidden; position: absolute; top: -9999px; }
+    .now-playing {
+      position: fixed; bottom: 0; left: 0; right: 0; 
+      background: rgba(10,10,26,0.95); backdrop-filter: blur(20px);
+      border-top: 1px solid rgba(255,255,255,0.1); padding: 16px 24px;
+      display: none; align-items: center; gap: 16px;
+    }
+    .now-playing.active { display: flex; }
+    .now-playing img { width: 48px; height: 48px; border-radius: 8px; }
+    .now-playing .np-info { flex: 1; }
+    .now-playing .np-title { font-weight: 600; font-size: 14px; }
+    .now-playing .np-artist { font-size: 12px; color: #9ca3af; }
+    .np-controls { display: flex; gap: 12px; }
+    .np-controls button {
+      width: 40px; height: 40px; border-radius: 50%; border: none;
+      background: linear-gradient(135deg, #667eea, #764ba2); color: #fff;
+      font-size: 18px; cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>🎵 Sonix Music - Audio Test</h1>
+  <h2>Testing YouTube IFrame API for ad-free background playback</h2>
+
+  <div id="player-container"></div>
+
+  <div class="test-card">
+    <h3>🧪 Test 1: YouTube IFrame API Loading</h3>
+    <p>Checking if the YouTube IFrame API loads correctly...</p>
+    <div id="api-status" class="status loading">⏳ Loading YouTube IFrame API...</div>
+  </div>
+
+  <div class="test-card">
+    <h3>🎶 Test 2: Play Songs from CSV Data</h3>
+    <p>Click any song below to test playback. Audio plays from YouTube in background (invisible player).</p>
+    
+    <div class="song-item" onclick="playSong('Anuvanuvuu', 'Arijit Singh', 'https://c.saavncdn.com/000/Om-Bheem-Bush-Telugu-2024-20240401231417-150x150.jpg')">
+      <img src="https://c.saavncdn.com/000/Om-Bheem-Bush-Telugu-2024-20240401231417-150x150.jpg" alt="">
+      <div class="song-info">
+        <div class="title">Anuvanuvuu</div>
+        <div class="artist">Arijit Singh • Om Bheem Bush (2024)</div>
+      </div>
+      <button class="play-btn">▶</button>
+    </div>
+
+    <div class="song-item" onclick="playSong('Srivalli', 'Sid Sriram', 'https://c.saavncdn.com/blob/056/Pushpa-The-Rise-Telugu-2021-20211216115409-150x150.jpg')">
+      <img src="https://c.saavncdn.com/blob/056/Pushpa-The-Rise-Telugu-2021-20211216115409-150x150.jpg" alt="">
+      <div class="song-info">
+        <div class="title">Srivalli</div>
+        <div class="artist">Sid Sriram • Pushpa - The Rise (2021)</div>
+      </div>
+      <button class="play-btn">▶</button>
+    </div>
+
+    <div class="song-item" onclick="playSong('Inkem Inkem Inkem Kaavaale', 'Sid Sriram', 'https://c.saavncdn.com/237/Geetha-Govindam-Telugu-2018-20180921-150x150.jpg')">
+      <img src="https://c.saavncdn.com/237/Geetha-Govindam-Telugu-2018-20180921-150x150.jpg" alt="">
+      <div class="song-info">
+        <div class="title">Inkem Inkem Inkem Kaavaale</div>
+        <div class="artist">Sid Sriram • Geetha Govindam (2018)</div>
+      </div>
+      <button class="play-btn">▶</button>
+    </div>
+
+    <div class="song-item" onclick="playSong('Buttabomma', 'Armaan Malik', 'https://c.saavncdn.com/517/Ala-Vaikunthapurramuloo-Telugu-2019-20200116144338-150x150.jpg')">
+      <img src="https://c.saavncdn.com/517/Ala-Vaikunthapurramuloo-Telugu-2019-20200116144338-150x150.jpg" alt="">
+      <div class="song-info">
+        <div class="title">Buttabomma</div>
+        <div class="artist">Armaan Malik • Ala Vaikunthapurramuloo (2019)</div>
+      </div>
+      <button class="play-btn">▶</button>
+    </div>
+
+    <div class="song-item" onclick="playSong('Chaleya', 'Arijit Singh', 'https://i.scdn.co/image/ab67616d0000b273e452a6e11147f3e56aee6f5b')">
+      <img src="https://i.scdn.co/image/ab67616d0000b273e452a6e11147f3e56aee6f5b" alt="">
+      <div class="song-info">
+        <div class="title">Chaleya</div>
+        <div class="artist">Arijit Singh • Jawan (2023)</div>
+      </div>
+      <button class="play-btn">▶</button>
+    </div>
+
+    <div id="play-status" class="status" style="display:none;"></div>
+  </div>
+
+  <div class="test-card">
+    <h3>📱 Test 3: Background Playback</h3>
+    <p>After clicking play on a song above, minimize this browser window or switch tabs. The audio should continue playing in the background — just like a native mobile music app!</p>
+    <div id="bg-status" class="status loading">⏳ Play a song first to test background playback</div>
+  </div>
+
+  <div class="now-playing" id="now-playing">
+    <img id="np-img" src="" alt="">
+    <div class="np-info">
+      <div class="np-title" id="np-title">-</div>
+      <div class="np-artist" id="np-artist">-</div>
+    </div>
+    <div class="np-controls">
+      <button onclick="togglePlay()" id="pp-btn">⏸</button>
+    </div>
+  </div>
+
+  <script>
+    let player = null;
+    let isPlaying = false;
+    let currentSong = null;
+
+    // Load YouTube IFrame API
+    const tag = document.createElement('script');
+    tag.src = 'https://www.youtube.com/iframe_api';
+    document.head.appendChild(tag);
+
+    function onYouTubeIframeAPIReady() {
+      document.getElementById('api-status').className = 'status';
+      document.getElementById('api-status').textContent = '✅ YouTube IFrame API loaded successfully! Ready to play music.';
+      
+      player = new YT.Player('player-container', {
+        height: '1',
+        width: '1',
+        playerVars: {
+          autoplay: 0,
+          controls: 0,
+          disablekb: 1,
+          fs: 0,
+          modestbranding: 1,
+          rel: 0,
+          showinfo: 0,
+        },
+        events: {
+          onReady: () => console.log('Player ready'),
+          onStateChange: onPlayerStateChange,
+          onError: (e) => {
+            console.error('Player error:', e.data);
+            const statusEl = document.getElementById('play-status');
+            statusEl.style.display = 'block';
+            statusEl.className = 'status error';
+            statusEl.textContent = '❌ Playback error. Trying next result...';
+          }
+        }
+      });
+    }
+
+    function onPlayerStateChange(event) {
+      if (event.data === YT.PlayerState.PLAYING) {
+        isPlaying = true;
+        document.getElementById('pp-btn').textContent = '⏸';
+        document.getElementById('bg-status').className = 'status';
+        document.getElementById('bg-status').textContent = '✅ Audio is playing! Try switching tabs or minimizing the window — audio continues!';
+        
+        // Set Media Session for mobile background support
+        if ('mediaSession' in navigator && currentSong) {
+          navigator.mediaSession.metadata = new MediaMetadata({
+            title: currentSong.title,
+            artist: currentSong.artist,
+            artwork: [{ src: currentSong.image, sizes: '150x150', type: 'image/jpeg' }]
+          });
+          navigator.mediaSession.setActionHandler('play', () => player.playVideo());
+          navigator.mediaSession.setActionHandler('pause', () => player.pauseVideo());
+        }
+      } else if (event.data === YT.PlayerState.PAUSED) {
+        isPlaying = false;
+        document.getElementById('pp-btn').textContent = '▶';
+      } else if (event.data === YT.PlayerState.ENDED) {
+        isPlaying = false;
+        document.getElementById('pp-btn').textContent = '▶';
+      }
+    }
+
+    async function searchYouTube(query) {
+      // Use YouTube's internal search suggestion / oEmbed as a free alternative
+      // We'll use the invidious API (free, no key needed) to search for videos
+      const apis = [
+        `https://pipedapi.kavin.rocks/search?q=${encodeURIComponent(query)}&filter=music_songs`,
+        `https://pipedapi.adminforge.de/search?q=${encodeURIComponent(query)}&filter=music_songs`,
+      ];
+
+      for (const apiUrl of apis) {
+        try {
+          const res = await fetch(apiUrl);
+          if (res.ok) {
+            const data = await res.json();
+            const items = data.items || data;
+            if (items && items.length > 0) {
+              // Find first video result
+              const video = items.find(i => i.url && i.url.includes('/watch'));
+              if (video) {
+                const videoId = video.url.split('v=')[1] || video.url.split('/watch/')[1];
+                return videoId;
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('API failed, trying next:', e);
+        }
+      }
+
+      // Fallback: try YouTube noembed
+      try {
+        const res = await fetch(`https://noembed.com/embed?url=https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`);
+        // This won't work for search, so let's use a JS workaround
+      } catch(e) {}
+
+      return null;
+    }
+
+    async function playSong(title, artist, image) {
+      if (!player) {
+        alert('YouTube API not loaded yet. Please wait...');
+        return;
+      }
+
+      currentSong = { title, artist, image };
+
+      const statusEl = document.getElementById('play-status');
+      statusEl.style.display = 'block';
+      statusEl.className = 'status loading';
+      statusEl.textContent = `⏳ Searching for "${title}" by ${artist}...`;
+
+      // Show now playing bar
+      document.getElementById('now-playing').classList.add('active');
+      document.getElementById('np-title').textContent = title;
+      document.getElementById('np-artist').textContent = artist;
+      document.getElementById('np-img').src = image;
+
+      const query = `${title} ${artist} official audio`;
+      const videoId = await searchYouTube(query);
+
+      if (videoId) {
+        statusEl.className = 'status';
+        statusEl.textContent = `✅ Found! Playing "${title}" (YouTube ID: ${videoId})`;
+        player.loadVideoById(videoId);
+        player.playVideo();
+      } else {
+        // Fallback: try with just the title  
+        statusEl.className = 'status loading';
+        statusEl.textContent = `⏳ Trying alternate search for "${title}"...`;
+        
+        const videoId2 = await searchYouTube(`${title} ${artist} song`);
+        if (videoId2) {
+          statusEl.className = 'status';
+          statusEl.textContent = `✅ Found! Playing "${title}" (YouTube ID: ${videoId2})`;
+          player.loadVideoById(videoId2);
+          player.playVideo();
+        } else {
+          statusEl.className = 'status error';
+          statusEl.textContent = `❌ Could not find "${title}" on YouTube. The Piped API may be rate-limited. In the full app we'll use multiple fallback APIs.`;
+        }
+      }
+    }
+
+    function togglePlay() {
+      if (!player) return;
+      if (isPlaying) {
+        player.pauseVideo();
+      } else {
+        player.playVideo();
+      }
+    }
+  </script>
+</body>
+</html>

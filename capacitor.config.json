@@ -1,0 +1,10 @@
+{
+  "appId": "com.sonix.music",
+  "appName": "Sonix Music",
+  "webDir": "public",
+  "bundledWebRuntime": false,
+  "server": {
+    "url": "http://10.0.2.2:3000",
+    "cleartext": true
+  }
+}

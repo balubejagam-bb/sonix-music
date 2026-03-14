@@ -1,0 +1,123 @@
+import { NextResponse } from 'next/server';
+
+const PIPED_INSTANCES = [
+  'https://pipedapi.kavin.rocks',
+  'https://pipedapi.adminforge.de',
+  'https://watchapi.whatever.social',
+  'https://pipedapi.in.projectsegfau.lt',
+  'https://api.piped.yt',
+  'https://pipedapi.r4fo.com',
+  'https://pipedapi.leptons.xyz',
+];
+
+const INVIDIOUS_INSTANCES = [
+  'https://inv.nadeko.net',
+  'https://invidious.nerdvpn.de',
+  'https://invidious.privacyredirect.com',
+  'https://invidious.protokolla.fi',
+  'https://yt.artemislena.eu',
+  'https://invidious.perennialte.ch',
+];
+
+async function searchWithInvidious(query) {
+  for (const instance of INVIDIOUS_INSTANCES) {
+    try {
+      const url = `${instance}/api/v1/search?q=${encodeURIComponent(query)}&type=video&sort_by=relevance`;
+      const res = await fetch(url, { 
+        signal: AbortSignal.timeout(8000),
+        headers: { 'Accept': 'application/json' }
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        const video = data.find(i => i.type === 'video' && i.videoId);
+        if (video) {
+          return { videoId: video.videoId, title: video.title || '' };
+        }
+      }
+    } catch (e) {
+      continue;
+    }
+  }
+  return null;
+}
+
+async function searchWithPiped(query) {
+  for (const instance of PIPED_INSTANCES) {
+    for (const filter of ['music_songs', 'videos']) {
+      try {
+        const url = `${instance}/search?q=${encodeURIComponent(query)}&filter=${filter}`;
+        const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+        if (!res.ok) continue;
+        const data = await res.json();
+        const items = data.items || data;
+        const video = items?.find(i => i.url?.includes('/watch'));
+        if (video) {
+          const videoId = video.url.replace('/watch?v=', '');
+          return { videoId, title: video.title || '' };
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+  }
+  return null;
+}
+
+async function searchWithYTScrape(query) {
+  try {
+    // Use YouTube's internal suggest/complete API
+    const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}&sp=EgIQAQ%253D%253D`;
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(10000),
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+      }
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    // Extract video IDs from the HTML
+    const videoIdMatch = html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
+    if (videoIdMatch) {
+      return { videoId: videoIdMatch[1], title: '' };
+    }
+  } catch (e) {
+    console.error('YT scrape error:', e.message);
+  }
+  return null;
+}
+
+export async function GET(request) {
+  const { searchParams } = new URL(request.url);
+  const q = searchParams.get('q') || '';
+
+  if (!q) {
+    return NextResponse.json({ error: 'Missing query' }, { status: 400 });
+  }
+
+  // Try all methods in parallel for speed
+  const [invidiousResult, pipedResult, scrapeResult] = await Promise.allSettled([
+    searchWithInvidious(q),
+    searchWithPiped(q),
+    searchWithYTScrape(q),
+  ]);
+
+  // Return the first successful result
+  for (const result of [invidiousResult, pipedResult, scrapeResult]) {
+    if (result.status === 'fulfilled' && result.value?.videoId) {
+      return NextResponse.json(result.value);
+    }
+  }
+
+  // Retry with simpler query
+  const simpleQ = q.replace(/official audio|official|audio|full song/gi, '').trim();
+  if (simpleQ !== q) {
+    const retryResult = await searchWithYTScrape(simpleQ);
+    if (retryResult?.videoId) {
+      return NextResponse.json(retryResult);
+    }
+  }
+
+  return NextResponse.json({ videoId: null, error: 'No results found' });
+}
