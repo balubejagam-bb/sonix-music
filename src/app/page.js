@@ -342,9 +342,21 @@ export default function Home() {
 
       {/* Sidebar */}
       <aside className={`sidebar ${mobileMenuOpen ? 'open' : ''}`}>
-        <div className="sidebar-logo">
-          <div className="logo-icon">🎵</div>
-          <h1 style={{ background: 'var(--gradient-neon)', WebkitBackgroundClip: 'text', backgroundClip: 'text', WebkitTextFillColor: 'transparent', color: 'transparent', fontSize: '1.2rem' }}>𝕊𝕠𝕟𝕚𝕩 𝕞𝕦𝕤𝕚𝕔 -𝕋𝕁</h1>
+        <div className="sidebar-logo" style={{ border: 'none', padding: '24px 20px 15px' }}>
+          <h1 style={{ 
+            background: 'linear-gradient(135deg, #a78bfa 0%, #f472b6 100%)', 
+            WebkitBackgroundClip: 'text', 
+            backgroundClip: 'text', 
+            WebkitTextFillColor: 'transparent', 
+            color: '#a78bfa', 
+            fontSize: '1.5rem',
+            fontWeight: '900',
+            letterSpacing: '-0.5px',
+            textShadow: '0 0 20px rgba(167, 139, 250, 0.3)',
+            filter: 'drop-shadow(0 2px 2px rgba(0,0,0,0.5))'
+          }}>
+            SONIX MUSIC <span style={{ WebkitTextFillColor: '#fff', fontSize: '0.9rem', verticalAlign: 'middle', marginLeft: '5px' }}>-TJ</span>
+          </h1>
         </div>
         <nav className="sidebar-nav">
           <div className="nav-section-title">Menu</div>
@@ -376,10 +388,10 @@ export default function Home() {
 
           <div className="nav-section-title">Developer Studio</div>
           <button className="nav-item developer-item" onClick={() => document.getElementById('music-upload-input').click()} style={{ background: 'rgba(255,255,255,0.05)', border: '1px dashed rgba(255,255,255,0.2)', marginTop: '4px' }}>
-            <span className="icon">🚀</span> <b>Upload to Library</b>
+            <span className="icon">🚀</span> <b>Upload & Sync Library</b>
           </button>
           
-          <div style={{ height: '120px' }}></div> {/* Safe area for mobile navigation */}
+          <div style={{ height: '200px' }}></div> {/* Increased safe area */}
 
           {/* Hidden File Input */}
           <input 
@@ -387,11 +399,34 @@ export default function Home() {
             id="music-upload-input" 
             style={{ display: 'none' }} 
             accept=".csv, .mp3, .wav" 
+            multiple
             onChange={async (e) => {
-              if (e.target.files && e.target.files[0]) {
-                const fileName = e.target.files[0].name;
-                alert(`SUCCESS: Sonix Music has received "${fileName}".\n\nSynchronizing with Global Database...`);
-                setTimeout(() => alert('Index Updated! Your song is now live in the global search library.'), 2000);
+              if (e.target.files && e.target.files.length > 0) {
+                const count = e.target.files.length;
+                alert(`Preparing to sync ${count} file(s) with the Global Database...`);
+                
+                try {
+                  const songData = Array.from(e.target.files).map(f => ({
+                    title: f.name.replace(/\.[^/.]+$/, ""),
+                    artist: 'Self Upload',
+                    album: 'My Library'
+                  }));
+
+                  const res = await fetch('/api/upload', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(songData)
+                  });
+                  const data = await res.json();
+                  if (data.success) {
+                    alert(`✅ SUCCESS: ${data.count} items indexed!\n\nRefresh or Search to see your songs in the library.`);
+                    loadSongs(1); // Refresh list
+                  } else {
+                    alert('Upload failed: ' + data.error);
+                  }
+                } catch(err) {
+                  alert('Sync Error: ' + err.message);
+                }
               }
             }} 
           />

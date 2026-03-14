@@ -95,6 +95,7 @@ async function searchWithYTScrape(query) {
 
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
+  const q = searchParams.get('q') || '';
   const multi = searchParams.get('multi') === 'true';
 
   if (!q) {
@@ -102,44 +103,48 @@ export async function GET(request) {
   }
 
   // Try all methods in parallel for speed
-  const [invidiousResult, pipedResult, scrapeResult] = await Promise.allSettled([
-    searchWithInvidious(q, multi),
-    searchWithPiped(q, multi),
-    searchWithYTScrape(q), // Scrape doesn't support multi yet
-  ]);
+  try {
+    const [invidiousResult, pipedResult, scrapeResult] = await Promise.allSettled([
+      searchWithInvidious(q, multi),
+      searchWithPiped(q, multi),
+      searchWithYTScrape(q), 
+    ]);
 
-  if (multi) {
-    // Collect all unique results from multi-sources
-    const results = [];
-    const seen = new Set();
-    [invidiousResult, pipedResult].forEach(res => {
-      if (res.status === 'fulfilled' && Array.isArray(res.value)) {
-        res.value.forEach(v => {
-          if (!seen.has(v.videoId)) {
-            seen.add(v.videoId);
-            results.push(v);
-          }
-        });
+    if (multi) {
+      const results = [];
+      const seen = new Set();
+      [invidiousResult, pipedResult].forEach(res => {
+        if (res.status === 'fulfilled' && Array.isArray(res.value)) {
+          res.value.forEach(v => {
+            if (v.videoId && !seen.has(v.videoId)) {
+              seen.add(v.videoId);
+              results.push(v);
+            }
+          });
+        }
+      });
+      return NextResponse.json({ results: results.slice(0, 15) });
+    }
+
+    // Return the first valid videoId
+    for (const result of [invidiousResult, pipedResult, scrapeResult]) {
+      if (result.status === 'fulfilled' && result.value?.videoId) {
+        return NextResponse.json(result.value);
       }
-    });
-    return NextResponse.json({ results: results.slice(0, 15) });
-  }
-
-  // Return the first successful result
-  for (const result of [invidiousResult, pipedResult, scrapeResult]) {
-    if (result.status === 'fulfilled' && result.value?.videoId) {
-      return NextResponse.json(result.value);
     }
-  }
 
-  // Retry with simpler query
-  const simpleQ = q.replace(/official audio|official|audio|full song/gi, '').trim();
-  if (simpleQ !== q) {
-    const retryResult = await searchWithYTScrape(simpleQ);
-    if (retryResult?.videoId) {
-      return NextResponse.json(retryResult);
+    // Last resort scrape retry
+    const simpleQ = q.replace(/official audio|official|audio|full song/gi, '').trim();
+    if (simpleQ !== q) {
+      const retryResult = await searchWithYTScrape(simpleQ);
+      if (retryResult?.videoId) {
+        return NextResponse.json(retryResult);
+      }
     }
-  }
 
-  return NextResponse.json({ videoId: null, error: 'No results found' });
+    return NextResponse.json({ videoId: null, error: 'No results found' });
+  } catch (err) {
+    console.error('Final search crash:', err);
+    return NextResponse.json({ error: 'Search Engine Error', details: err.message }, { status: 500 });
+  }
 }
