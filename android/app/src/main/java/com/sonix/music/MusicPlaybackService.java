@@ -37,12 +37,85 @@ public class MusicPlaybackService extends MediaSessionService {
     public static final String ACTION_SEEK = "com.sonix.music.action.SEEK";
     public static final String ACTION_SET_SHUFFLE = "com.sonix.music.action.SET_SHUFFLE";
     public static final String ACTION_SET_REPEAT = "com.sonix.music.action.SET_REPEAT";
+    public static final String ACTION_TOGGLE_PAUSE = "com.sonix.music.action.TOGGLE_PAUSE";
 
     private static final String CHANNEL_ID = "sonix_music_playback";
     private static final int NOTIFICATION_ID = 1001;
 
     private ExoPlayer player;
     private MediaSession mediaSession;
+    public static ExoPlayer currentPlayer;
+
+    private final android.os.Handler updateHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable updateRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (player != null && player.isPlaying()) {
+                MusicPlayerPlugin.onStateChanged(true, player.getCurrentPosition(), player.getDuration(), player.getPlaybackState());
+            }
+            updateHandler.postDelayed(this, 1000);
+        }
+    };
+
+    private PendingIntent createActionIntent(String action) {
+        Intent intent = new Intent(this, MusicPlaybackService.class);
+        intent.setAction(action);
+        return PendingIntent.getService(this, 0, intent, PendingIntent.FLAG_IMMUTABLE);
+    }
+
+    private void createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                CHANNEL_ID,
+                "Playback Controls",
+                NotificationManager.IMPORTANCE_LOW
+            );
+            channel.setDescription("Shows controls for the current song");
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager != null) {
+                manager.createNotificationChannel(channel);
+            }
+        }
+    }
+
+    private void updateForegroundNotification(String title, String artist) {
+        Intent mainIntent = new Intent(this, MainActivity.class);
+        PendingIntent contentIntent = PendingIntent.getActivity(
+            this,
+            0,
+            mainIntent,
+            PendingIntent.FLAG_IMMUTABLE
+        );
+
+        boolean isPlaying = player != null && player.isPlaying();
+
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(artist)
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setContentIntent(contentIntent)
+            .setOngoing(isPlaying)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .addAction(new NotificationCompat.Action(
+                android.R.drawable.ic_media_previous, "Previous", createActionIntent(ACTION_PREVIOUS)))
+            .addAction(new NotificationCompat.Action(
+                isPlaying ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play,
+                isPlaying ? "Pause" : "Play",
+                createActionIntent(ACTION_TOGGLE_PAUSE)))
+            .addAction(new NotificationCompat.Action(
+                android.R.drawable.ic_media_next, "Next", createActionIntent(ACTION_NEXT)))
+            .setStyle(new androidx.media.app.NotificationCompat.MediaStyle()
+                .setMediaSession(mediaSession.getSessionCompatToken())
+                .setShowActionsInCompactView(0, 1, 2));
+
+        Notification notification = builder.build();
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+        } else {
+            startForeground(NOTIFICATION_ID, notification);
+        }
+    }
 
     @Override
     public void onCreate() {
@@ -54,32 +127,120 @@ public class MusicPlaybackService extends MediaSessionService {
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build();
 
-        player = new ExoPlayer.Builder(this).build();
+        androidx.media3.exoplayer.DefaultLoadControl loadControl = new androidx.media3.exoplayer.DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                50000, // minBufferMs
+                100000, // maxBufferMs
+                2500, // bufferForPlaybackMs
+                5000  // bufferForPlaybackAfterRebufferMs
+            )
+            .build();
+
+        player = new ExoPlayer.Builder(this)
+            .setLoadControl(loadControl)
+            .build();
         player.setAudioAttributes(audioAttributes, true);
         player.setHandleAudioBecomingNoisy(true);
         player.setWakeMode(C.WAKE_MODE_NETWORK);
+
+        // Wrap player to force Next/Previous commands to be available
+        androidx.media3.common.ForwardingPlayer forwardingPlayer = new androidx.media3.common.ForwardingPlayer(player) {
+            @Override
+            public androidx.media3.common.Player.Commands getAvailableCommands() {
+                return super.getAvailableCommands().buildUpon()
+                    .add(androidx.media3.common.Player.COMMAND_SEEK_TO_NEXT)
+                    .add(androidx.media3.common.Player.COMMAND_SEEK_TO_PREVIOUS)
+                    .build();
+            }
+
+            @Override
+            public boolean isCommandAvailable(int command) {
+                return command == androidx.media3.common.Player.COMMAND_SEEK_TO_NEXT ||
+                       command == androidx.media3.common.Player.COMMAND_SEEK_TO_PREVIOUS ||
+                       super.isCommandAvailable(command);
+            }
+        };
+
+        currentPlayer = player;
         
-        player.addListener(new Player.Listener() {
+        forwardingPlayer.addListener(new Player.Listener() {
             @Override
             public void onPlaybackStateChanged(int playbackState) {
-                updateNotification();
-                if (playbackState == Player.STATE_ENDED && !player.hasNextMediaItem()) {
-                    stopForeground(false);
-                }
+                notifyState();
             }
 
             @Override
             public void onIsPlayingChanged(boolean isPlaying) {
-                updateNotification();
+                notifyState();
+                if (isPlaying) {
+                    updateHandler.post(updateRunnable);
+                } else {
+                    updateHandler.removeCallbacks(updateRunnable);
+                }
+            }
+
+            @Override
+            public void onPlayerError(androidx.media3.common.PlaybackException error) {
+                android.util.Log.e("SonixMusic", "Player Error: " + error.errorCode + " - " + error.getMessage(), error);
+            }
+
+            @Override
+            public void onMediaMetadataChanged(MediaMetadata mediaMetadata) {
+                notifyState();
             }
         });
 
-        mediaSession = new MediaSession.Builder(this, player).build();
+        mediaSession = new MediaSession.Builder(this, forwardingPlayer)
+            .setCallback(new MediaSession.Callback() {
+                @Override
+                public androidx.media3.session.MediaSession.ConnectionResult onConnect(
+                        MediaSession session, 
+                        androidx.media3.session.MediaSession.ControllerInfo controller) {
+                    androidx.media3.common.Player.Commands commands = androidx.media3.common.Player.Commands.EMPTY.buildUpon()
+                        .add(androidx.media3.common.Player.COMMAND_PLAY_PAUSE)
+                        .add(androidx.media3.common.Player.COMMAND_SEEK_TO_NEXT)
+                        .add(androidx.media3.common.Player.COMMAND_SEEK_TO_PREVIOUS)
+                        .add(androidx.media3.common.Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
+                        .add(androidx.media3.common.Player.COMMAND_STOP)
+                        .build();
+                    return new androidx.media3.session.MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                        .setAvailablePlayerCommands(commands)
+                        .build();
+                }
+
+                @Override
+                public int onPlayerCommandRequest(MediaSession session, ControllerInfo controller, int playerCommand) {
+                    if (playerCommand == androidx.media3.common.Player.COMMAND_SEEK_TO_NEXT) {
+                        MusicPlayerPlugin.triggerWebAction("next");
+                        return androidx.media3.session.SessionResult.RESULT_SUCCESS;
+                    } else if (playerCommand == androidx.media3.common.Player.COMMAND_SEEK_TO_PREVIOUS) {
+                        MusicPlayerPlugin.triggerWebAction("previous");
+                        return androidx.media3.session.SessionResult.RESULT_SUCCESS;
+                    }
+                    return androidx.media3.session.SessionResult.RESULT_SUCCESS;
+                }
+            })
+            .build();
+        updateHandler.post(updateRunnable);
+    }
+
+    private void notifyState() {
+        if (player != null) {
+            MusicPlayerPlugin.onStateChanged(player.isPlaying(), player.getCurrentPosition(), player.getDuration(), player.getPlaybackState());
+            
+            MediaMetadata metadata = player.getMediaMetadata();
+            String title = metadata.title != null ? metadata.title.toString() : "Sonix Music";
+            String artist = metadata.artist != null ? metadata.artist.toString() : "Playing...";
+            
+            if (player.getPlaybackState() != Player.STATE_IDLE) {
+                updateForegroundNotification(title, artist);
+            }
+        }
     }
 
     @Override
     public int onStartCommand(@Nullable Intent intent, int flags, int startId) {
-        startForeground(NOTIFICATION_ID, createNotification("Sonix Music", "Loading..."));
+        super.onStartCommand(intent, flags, startId);
         handleAction(intent);
         return START_STICKY;
     }
@@ -118,13 +279,19 @@ public class MusicPlaybackService extends MediaSessionService {
                     stopForeground(true);
                     stopSelf();
                     break;
+                case ACTION_TOGGLE_PAUSE:
+                    if (player.isPlaying()) player.pause();
+                    else player.play();
+                    break;
                 case ACTION_NEXT:
+                    MusicPlayerPlugin.triggerWebAction("next");
                     if (player.hasNextMediaItem()) {
                         player.seekToNextMediaItem();
                         player.play();
                     }
                     break;
                 case ACTION_PREVIOUS:
+                    MusicPlayerPlugin.triggerWebAction("previous");
                     if (player.hasPreviousMediaItem()) {
                         player.seekToPreviousMediaItem();
                         player.play();
@@ -172,8 +339,6 @@ public class MusicPlaybackService extends MediaSessionService {
         player.setMediaItem(item);
         player.prepare();
         player.play();
-        
-        updateNotification(title, artist);
     }
 
     private void playQueue(Intent intent) {
@@ -221,8 +386,6 @@ public class MusicPlaybackService extends MediaSessionService {
         player.setMediaItems(items, index, C.TIME_UNSET);
         player.prepare();
         player.play();
-        
-        updateNotification();
     }
 
     private MediaItem buildItem(String url, String title, String artist, String album, String artwork) {
@@ -244,7 +407,6 @@ public class MusicPlaybackService extends MediaSessionService {
             .setMediaMetadata(metaBuilder.build())
             .build();
     }
-
     private int mapRepeatMode(String mode) {
         if ("one".equalsIgnoreCase(mode)) {
             return Player.REPEAT_MODE_ONE;
@@ -255,83 +417,11 @@ public class MusicPlaybackService extends MediaSessionService {
         return Player.REPEAT_MODE_OFF;
     }
 
-    private void createNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            return;
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        if (!player.getPlayWhenReady() || player.getPlaybackState() == Player.STATE_IDLE || player.getPlaybackState() == Player.STATE_ENDED) {
+            stopSelf();
         }
-        NotificationManager manager = getSystemService(NotificationManager.class);
-        if (manager == null || manager.getNotificationChannel(CHANNEL_ID) != null) {
-            return;
-        }
-        NotificationChannel channel = new NotificationChannel(
-            CHANNEL_ID,
-            "Sonix Music Playback",
-            NotificationManager.IMPORTANCE_LOW
-        );
-        channel.setDescription("Music playback controls");
-        channel.setShowBadge(false);
-        manager.createNotificationChannel(channel);
-    }
-
-    private void updateNotification() {
-        if (player != null && player.getCurrentMediaItem() != null) {
-            MediaMetadata metadata = player.getCurrentMediaItem().mediaMetadata;
-            String title = metadata.title != null ? metadata.title.toString() : "Sonix Music";
-            String artist = metadata.artist != null ? metadata.artist.toString() : "Now Playing";
-            updateNotification(title, artist);
-        }
-    }
-
-    private void updateNotification(String title, String artist) {
-        Notification notification = createNotification(title, artist);
-        NotificationManager manager = getSystemService(NotificationManager.class);
-        if (manager != null) {
-            manager.notify(NOTIFICATION_ID, notification);
-        }
-    }
-
-    private Notification createNotification(String title, String text) {
-        Intent notificationIntent = new Intent(this, MainActivity.class);
-        PendingIntent pendingIntent = PendingIntent.getActivity(
-            this, 
-            0, 
-            notificationIntent, 
-            PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
-        );
-
-        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText(text)
-            .setSmallIcon(android.R.drawable.ic_media_play)
-            .setContentIntent(pendingIntent)
-            .setOngoing(true)
-            .setShowWhen(false)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC);
-
-        if (player != null && player.isPlaying()) {
-            builder.addAction(android.R.drawable.ic_media_pause, "Pause", 
-                createActionIntent(ACTION_PAUSE));
-        } else {
-            builder.addAction(android.R.drawable.ic_media_play, "Play", 
-                createActionIntent(ACTION_RESUME));
-        }
-
-        builder.addAction(android.R.drawable.ic_media_next, "Next", 
-            createActionIntent(ACTION_NEXT));
-
-        return builder.build();
-    }
-
-    private PendingIntent createActionIntent(String action) {
-        Intent intent = new Intent(this, MusicPlaybackService.class);
-        intent.setAction(action);
-        return PendingIntent.getService(
-            this, 
-            action.hashCode(), 
-            intent, 
-            PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
-        );
     }
 
     @Override

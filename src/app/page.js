@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { Capacitor, registerPlugin } from '@capacitor/core';
+import { LocalNotifications } from '@capacitor/local-notifications';
 
 const NativeMusicPlayer = registerPlugin('MusicPlayer');
 
@@ -9,10 +10,18 @@ function isNativeAndroid() {
   return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
 }
 
-// Ensure BackgroundMode doesn't crash SSR
-let BackgroundMode;
-if (typeof window !== 'undefined') {
-  import('@anuradev/capacitor-background-mode').then(m => { BackgroundMode = m.BackgroundMode; }).catch(()=> {});
+// Ensure BackgroundMode doesn't crash SSR or Capacitor init
+let BackgroundMode = null;
+async function getBackgroundMode() {
+  if (BackgroundMode) return BackgroundMode;
+  if (typeof window === 'undefined') return null;
+  try {
+    const m = await import('@anuradev/capacitor-background-mode');
+    BackgroundMode = m.BackgroundMode;
+    return BackgroundMode;
+  } catch(e) {
+    return null;
+  }
 }
 
 function getMusicControls() {
@@ -134,7 +143,12 @@ function useYouTubePlayer() {
   function seekTo(t) { playerRef.current?.seekTo(t, true); }
   function setVolume(v) { playerRef.current?.setVolume(v); }
 
-  return { ytReady, isPlaying, duration, currentTime, searchAndPlay, playVideoById, play, pause, seekTo, setVolume, onEndRef };
+  function updateNativeTime(c, d) {
+    if (typeof c === 'number' && !isNaN(c)) setCurrentTime(c);
+    if (typeof d === 'number' && d > 0) setDuration(d);
+  }
+
+  return { ytReady, isPlaying, duration, currentTime, searchAndPlay, playVideoById, play, pause, seekTo, setVolume, onEndRef, updateNativeTime };
 }
 
 // ─────────────────────── FORMAT TIME ───────────────────────
@@ -221,31 +235,38 @@ export default function Home() {
   // ───── Load initial data & cache ─────
   useEffect(() => {
     async function initNativeBackground() {
-      if (typeof window !== 'undefined' && canUseNativePlugins() && BackgroundMode) {
+      if (nativeAndroid) {
         try {
-          await BackgroundMode.requestNotificationsPermission();
-          await BackgroundMode.enable();
-          await BackgroundMode.setSettings({ title: 'Sonix Music', text: 'Playing in background', hidden: false });
-          await BackgroundMode.disableWebViewOptimizations();
+          await LocalNotifications.requestPermissions();
+        } catch(e) { console.error('Failed to request notification permission:', e); }
+      }
 
-          const battery = await BackgroundMode.checkBatteryOptimizations();
-          if (!battery.enabled) {
-            await BackgroundMode.requestDisableBatteryOptimizations();
+      // Request battery optimization exemption for background playback on real devices
+      if (nativeAndroid) {
+        try {
+          const bgMode = await getBackgroundMode();
+          if (bgMode) {
+            await bgMode.disableWebViewOptimizations();
+            const battery = await bgMode.checkBatteryOptimizations();
+            if (!battery.disabled) {
+              await bgMode.requestDisableBatteryOptimizations();
+            }
           }
-        } catch(e) { console.error('Background audio permissions error:', e); }
+        } catch(e) { console.error('Battery optimization request error:', e); }
       }
     }
     initNativeBackground();
 
     const onVisibilityChange = async () => {
-      if (!canUseNativePlugins() || !BackgroundMode) return;
-      if (!document.hidden) return;
-      try {
-        await BackgroundMode.enable();
-        await BackgroundMode.updateNotification({ title: 'Sonix Music', text: 'Playing in background', hidden: false });
-      } catch (e) {
-        console.error('Background mode resume error:', e);
-      }
+      // Redundant with MusicPlaybackService (Media3)
+      // if (!canUseNativePlugins() || !BackgroundMode) return;
+      // if (!document.hidden) return;
+      // try {
+      //   await BackgroundMode.enable();
+      //   await BackgroundMode.updateNotification({ title: 'Sonix Music', text: 'Playing in background', hidden: false });
+      // } catch (e) {
+      //   console.error('Background mode resume error:', e);
+      // }
     };
 
     document.addEventListener('visibilitychange', onVisibilityChange);
@@ -257,6 +278,46 @@ export default function Home() {
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, []);
+
+  // Listen to native player for progress updates and web actions
+  useEffect(() => {
+    if (nativeAndroid) {
+      const stateListener = NativeMusicPlayer.addListener('onStateChanged', (res) => {
+        if (res) {
+          yt.updateNativeTime(res.currentTime || 0, res.duration || 0);
+          setNativeIsPlaying(!!res.isPlaying);
+          
+          // STATE_ENDED = 4 in ExoPlayer
+          if (res.playbackState === 4) {
+             handleNext();
+          }
+        }
+      });
+
+      const actionListener = NativeMusicPlayer.addListener('onWebAction', (res) => {
+        if (res.action === 'next') handleNext();
+        if (res.action === 'previous') handlePrev();
+      });
+
+      // Fallback polling (less frequent)
+      const timer = setInterval(async () => {
+        try {
+          const res = await NativeMusicPlayer.getPosition();
+          if (res && res.currentTime !== undefined) {
+             yt.updateNativeTime(res.currentTime, res.duration || 0);
+             setNativeIsPlaying(!!res.isPlaying);
+          }
+        } catch (e) {}
+      }, 5000);
+
+      return () => {
+        stateListener.remove();
+        actionListener.remove();
+        clearInterval(timer);
+      };
+    }
+  }, [nativeAndroid]);
+
 
   async function fetchJsonWithFallback(paths) {
     for (const url of paths) {
@@ -717,8 +778,7 @@ export default function Home() {
   }
 
   async function handlePlayPauseToggle() {
-    const usingNativeNow = nativeAndroid && canPlayNatively(currentSong);
-    if (usingNativeNow) {
+    if (nativeAndroid && currentSong) {
       try {
         if (nativeIsPlaying) {
           await NativeMusicPlayer.pause();
@@ -734,6 +794,14 @@ export default function Home() {
     }
     if (yt.isPlaying) yt.pause();
     else yt.play();
+  }
+
+  function handleSeek(timeInSeconds) {
+    if (nativeAndroid && currentSong) {
+      NativeMusicPlayer.seekTo({ positionMs: timeInSeconds * 1000 });
+    } else {
+      yt.seekTo(timeInSeconds);
+    }
   }
 
   async function handleToggleShuffle() {
@@ -762,8 +830,20 @@ export default function Home() {
     }
   }
 
-  const activePlaying = nativeAndroid && canPlayNatively(currentSong) ? nativeIsPlaying : yt.isPlaying;
+  const activePlaying = nativeAndroid ? nativeIsPlaying : yt.isPlaying;
   const repeatLabel = repeatMode === 'off' ? '🔁' : repeatMode === 'one' ? '🔂' : '🔁';
+
+  // Gestures for full player
+  const touchStartX = useRef(0);
+  const handleTouchStart = (e) => { touchStartX.current = e.touches[0].clientX; };
+  const handleTouchEnd = (e) => {
+    const diff = e.changedTouches[0].clientX - touchStartX.current;
+    if (Math.abs(diff) > 70) {
+      if (diff > 0) handlePrev();
+      else handleNext();
+    }
+  };
+
   function loadMore() { loadSongs(page + 1, { search, genre, source }); }
 
   const displaySongs = search.trim() ? searchResults : songs;
@@ -1077,7 +1157,8 @@ export default function Home() {
                   e.stopPropagation();
                   const rect = e.currentTarget.getBoundingClientRect();
                   const pct = (e.clientX - rect.left) / rect.width;
-                  yt.seekTo(pct * yt.duration);
+                  yt.updateNativeTime(pct * yt.duration);
+                  handleSeek(pct * yt.duration);
                 }}>
                   <div className="progress-filled" style={{ width: yt.duration ? `${(yt.currentTime / yt.duration) * 100}%` : '0%' }}></div>
                 </div>
@@ -1125,9 +1206,17 @@ export default function Home() {
 
             <div className="full-player-grid">
               <div className="full-player-left">
-                <div className="artwork-container">
+                <div 
+                  className={`artwork-container ${activePlaying ? 'playing' : ''}`}
+                  onTouchStart={handleTouchStart}
+                  onTouchEnd={handleTouchEnd}
+                >
+                  <div className="vinyl-overlay">
+                    <div className="vinyl-lines"></div>
+                    <div className="vinyl-center"></div>
+                  </div>
                   {currentSong.image ? (
-                    <img src={currentSong.image} className={`artwork ${yt.isPlaying ? 'spin' : ''}`} alt="" />
+                    <img src={currentSong.image} className={`artwork ${activePlaying ? 'spin' : ''}`} alt="" />
                   ) : (
                     <div className="artwork placeholder">🎵</div>
                   )}
@@ -1141,13 +1230,13 @@ export default function Home() {
                 </div>
 
                 <div className="audio-beats-panel">
-                  <div className="panel-title">Audio Beatz Visualizer</div>
+                  <div className="panel-title">Visual Experience</div>
                   <div className="visualizer-options">
-                    <button className={visualizer === 'waves' ? 'active' : ''} onClick={() => setVisualizer('waves')}>Waves</button>
-                    <button className={visualizer === 'bars' ? 'active' : ''} onClick={() => setVisualizer('bars')}>EQ Bars</button>
-                    <button className={visualizer === 'pulse' ? 'active' : ''} onClick={() => setVisualizer('pulse')}>Pulse</button>
+                    <button className={visualizer === 'waves' ? 'active' : ''} onClick={() => setVisualizer('waves')}>Fluid Waves</button>
+                    <button className={visualizer === 'bars' ? 'active' : ''} onClick={() => setVisualizer('bars')}>Neon Bars</button>
+                    <button className={visualizer === 'pulse' ? 'active' : ''} onClick={() => setVisualizer('pulse')}>Atmosphere</button>
                   </div>
-                  <p className="note">Visualizer syncs with background playback engine.</p>
+                  <p className="note">Premium Visualizer Active</p>
                 </div>
 
                 <div className="progress-container">
@@ -1158,7 +1247,8 @@ export default function Home() {
                   <div className="progress-track-lg" onClick={(e) => {
                     const rect = e.currentTarget.getBoundingClientRect();
                     const pct = (e.clientX - rect.left) / rect.width;
-                    yt.seekTo(pct * yt.duration);
+                    yt.updateNativeTime(pct * yt.duration);
+                    handleSeek(pct * yt.duration);
                   }}>
                     <div className="progress-filled" style={{ width: yt.duration ? `${(yt.currentTime / yt.duration) * 100}%` : '0%' }}></div>
                   </div>

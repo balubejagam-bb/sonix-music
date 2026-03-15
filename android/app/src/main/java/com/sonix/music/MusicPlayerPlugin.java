@@ -13,6 +13,33 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 @CapacitorPlugin(name = "MusicPlayer")
 public class MusicPlayerPlugin extends Plugin {
 
+    private static MusicPlayerPlugin instance;
+
+    @Override
+    public void load() {
+        super.load();
+        instance = this;
+    }
+
+    public static void onStateChanged(boolean isPlaying, long currentTime, long duration, int playbackState) {
+        if (instance != null) {
+            com.getcapacitor.JSObject ret = new com.getcapacitor.JSObject();
+            ret.put("isPlaying", isPlaying);
+            ret.put("currentTime", currentTime / 1000.0);
+            ret.put("duration", duration / 1000.0);
+            ret.put("playbackState", playbackState);
+            instance.notifyListeners("onStateChanged", ret);
+        }
+    }
+
+    public static void triggerWebAction(String action) {
+        if (instance != null) {
+            com.getcapacitor.JSObject ret = new com.getcapacitor.JSObject();
+            ret.put("action", action);
+            instance.notifyListeners("onWebAction", ret);
+        }
+    }
+
     @PluginMethod
     public void play(PluginCall call) {
         String url = call.getString("url", "");
@@ -27,7 +54,7 @@ public class MusicPlayerPlugin extends Plugin {
         intent.putExtra("artist", call.getString("artist", "Unknown Artist"));
         intent.putExtra("album", call.getString("album", "Sonix Music"));
         intent.putExtra("artwork", call.getString("artwork", ""));
-        ContextCompat.startForegroundService(getContext(), intent);
+        getContext().startService(intent);
         call.resolve();
     }
 
@@ -44,7 +71,7 @@ public class MusicPlayerPlugin extends Plugin {
         intent.putExtra("index", call.getInt("index", 0));
         intent.putExtra("shuffle", call.getBoolean("shuffle", false));
         intent.putExtra("repeatMode", call.getString("repeatMode", "off"));
-        ContextCompat.startForegroundService(getContext(), intent);
+        getContext().startService(intent);
         call.resolve();
     }
 
@@ -98,6 +125,28 @@ public class MusicPlayerPlugin extends Plugin {
         intent.putExtra("repeatMode", mode);
         getContext().startService(intent);
         call.resolve();
+    }
+
+    @PluginMethod
+    public void getPosition(PluginCall call) {
+        if (MusicPlaybackService.currentPlayer != null) {
+            getActivity().runOnUiThread(() -> {
+                try {
+                    com.getcapacitor.JSObject ret = new com.getcapacitor.JSObject();
+                    long duration = MusicPlaybackService.currentPlayer.getDuration();
+                    long current = MusicPlaybackService.currentPlayer.getCurrentPosition();
+
+                    ret.put("currentTime", Math.max(0L, current) / 1000.0);
+                    ret.put("duration", duration > 0 ? duration / 1000.0 : 0.0);
+                    ret.put("isPlaying", MusicPlaybackService.currentPlayer.isPlaying());
+                    call.resolve(ret);
+                } catch (Exception e) {
+                    call.reject("Thread error", e);
+                }
+            });
+        } else {
+            call.resolve(); // Don't reject, just return empty
+        }
     }
 
     private void dispatchSimple(PluginCall call, String action) {
