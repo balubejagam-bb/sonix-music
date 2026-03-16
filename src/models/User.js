@@ -6,7 +6,8 @@ const UserSchema = new mongoose.Schema({
   password: { type: String, required: true, minlength: 6 },
   profileImage: { type: String, default: '' },
   likedSongs: [{ type: String }],           // song IDs
-  recentlyPlayed: [{ type: String }],       // last 20 song IDs
+  recentlyPlayed: [{ type: String }],       // last 20 song IDs (legacy)
+  recentSongObjects: [{ type: mongoose.Schema.Types.Mixed }], // full song snapshots, last 20
   library: [{ type: String }],              // saved album/playlist IDs
   playlists: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Playlist' }],
   isAdmin: { type: Boolean, default: false },

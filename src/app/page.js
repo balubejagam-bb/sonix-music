@@ -293,7 +293,7 @@ export default function Home() {
     loadSongs(1);
     backgroundCache();
 
-    // Restore recently played from localStorage
+    // Restore recently played from localStorage first (instant)
     try {
       const saved = localStorage.getItem('sonix_recent');
       if (saved) setRecentlyPlayed(JSON.parse(saved));
@@ -303,6 +303,51 @@ export default function Home() {
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, []);
+
+  // When user logs in OR cachedSongs loads, sync recently played from server
+  useEffect(() => {
+    if (!user) return;
+    const token = localStorage.getItem('sonix_token');
+    if (!token) return;
+
+    fetch('/api/user/recent', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(data => {
+        // Use full song objects if server has them
+        if (data.songs?.length) {
+          setRecentlyPlayed(prev => {
+            const serverKeys = new Set(data.songs.map(s => songKey(s)));
+            const localOnly = prev.filter(s => !serverKeys.has(songKey(s)));
+            const merged = [...data.songs, ...localOnly].slice(0, 20);
+            try { localStorage.setItem('sonix_recent', JSON.stringify(merged)); } catch {}
+            return merged;
+          });
+          return;
+        }
+
+        // Fallback: match IDs against cachedSongs
+        const ids = data.recentlyPlayed || [];
+        if (!ids.length || !cachedSongs.length) return;
+
+        const matched = ids
+          .map(id => cachedSongs.find(s => {
+            const k = s.songId || s._id?.toString() || s.videoId;
+            return k && String(k) === String(id);
+          }))
+          .filter(Boolean);
+
+        if (matched.length > 0) {
+          setRecentlyPlayed(prev => {
+            const serverKeys = new Set(matched.map(s => songKey(s)));
+            const localOnly = prev.filter(s => !serverKeys.has(songKey(s)));
+            const merged = [...matched, ...localOnly].slice(0, 20);
+            try { localStorage.setItem('sonix_recent', JSON.stringify(merged)); } catch {}
+            return merged;
+          });
+        }
+      })
+      .catch(() => {});
+  }, [user, cachedSongs]);
 
   // Listen to native player for progress updates and web actions
   useEffect(() => {
@@ -734,12 +779,14 @@ export default function Home() {
         return next;
       });
 
-      // Track on server if logged in
+      // Track on server if logged in — send full song object
       const token = typeof window !== 'undefined' ? localStorage.getItem('sonix_token') : null;
       if (token) {
-        const sid = songKey(playableSong);
-        fetch(`/api/user/recent/${encodeURIComponent(sid)}`, {
-          method: 'POST', headers: { Authorization: `Bearer ${token}` }
+        const sid = encodeURIComponent(songKey(playableSong));
+        fetch(`/api/user/recent/${sid}`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(playableSong),
         }).catch(() => {});
       }
 
