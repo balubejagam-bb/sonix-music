@@ -1,4 +1,5 @@
 import './globals.css';
+import { AuthProvider } from '@/lib/authContext';
 
 export const metadata = {
   title: 'Sonix Music – Ad-Free Music Streaming',
@@ -12,8 +13,9 @@ export default function RootLayout({ children }) {
         <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎵</text></svg>" />
       </head>
       <body>
-        {children}
-        <div id="yt-player-container"></div>
+        <AuthProvider>
+          {children}
+        </AuthProvider>
       </body>
     </html>
   );

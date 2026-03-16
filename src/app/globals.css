@@ -1312,3 +1312,35 @@ html, body {
   border: none; display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 8px 24px rgba(255,255,255,0.2); transition: 0.2s;
 }
 .controls-row-lg .play-pause-btn-lg:hover { transform: scale(1.05); }
+
+/* ── Song action buttons (like + add to playlist) ── */
+.song-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity 0.2s;
+  flex-shrink: 0;
+}
+.song-row:hover .song-actions {
+  opacity: 1;
+}
+/* Always show on touch devices */
+@media (hover: none) {
+  .song-actions { opacity: 1; }
+}
+.song-action-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 18px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  transition: background 0.15s, transform 0.1s;
+  line-height: 1;
+}
+.song-action-btn:hover {
+  background: rgba(255,255,255,0.08);
+  transform: scale(1.15);
+}
