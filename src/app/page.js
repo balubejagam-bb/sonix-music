@@ -1232,7 +1232,7 @@ export default function Home() {
               <div
                 key={song._id || song.songId || song.videoId || i}
                 className={`song-row fade-in ${isCurrentSong ? 'playing' : ''}`}
-                style={{ animationDelay: `${Math.min(i * 30, 500)}ms` }}
+                style={{ animationDelay: `${Math.min(i * 15, 200)}ms` }}
                 onClick={() => playSongDirect(song, activeSongs)}
               >
                 <span className="song-num">
