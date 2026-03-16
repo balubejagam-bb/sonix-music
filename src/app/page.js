@@ -48,6 +48,7 @@ function canUseNativePlugins() {
 function useYouTubePlayer() {
   const playerRef = useRef(null);      // YT.Player instance
   const containerRef = useRef(null);   // DOM div element
+  const silentAudioRef = useRef(null); // silent <audio> to anchor mediaSession on Android
   const [ytReady, setYtReady] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [duration, setDuration] = useState(0);
@@ -55,6 +56,7 @@ function useYouTubePlayer() {
   const timerRef = useRef(null);
   const onEndRef = useRef(null);
   const pendingVideoIdRef = useRef(null);
+  const loadedVideoIdRef = useRef(null); // tracks what videoId is currently loaded in the YT player
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -81,9 +83,24 @@ function useYouTubePlayer() {
             },
             onStateChange: (e) => {
               const S = window.YT.PlayerState;
-              if (e.data === S.PLAYING) { setIsPlaying(true); setDuration(playerRef.current.getDuration()); startTimer(); }
-              else if (e.data === S.PAUSED) { setIsPlaying(false); stopTimer(); }
-              else if (e.data === S.ENDED) { setIsPlaying(false); stopTimer(); if (onEndRef.current) onEndRef.current(); }
+              if (e.data === S.PLAYING) {
+                setIsPlaying(true);
+                setDuration(playerRef.current.getDuration());
+                startTimer();
+                // Anchor mediaSession on Android by playing the silent audio element
+                if (silentAudioRef.current) {
+                  silentAudioRef.current.play().catch(() => {});
+                }
+              } else if (e.data === S.PAUSED) {
+                setIsPlaying(false);
+                stopTimer();
+                if (silentAudioRef.current) silentAudioRef.current.pause();
+              } else if (e.data === S.ENDED) {
+                setIsPlaying(false);
+                stopTimer();
+                if (silentAudioRef.current) silentAudioRef.current.pause();
+                if (onEndRef.current) onEndRef.current();
+              }
             },
             onError: () => { setIsPlaying(false); stopTimer(); },
           },
@@ -123,10 +140,20 @@ function useYouTubePlayer() {
       const query = `${title} ${artist} official audio`;
       const res = await fetch(`/api/youtube-search?q=${encodeURIComponent(query)}`);
       const data = await res.json();
-      if (data.videoId && isReady()) { playerRef.current.loadVideoById(data.videoId); playerRef.current.playVideo(); return true; }
+      if (data.videoId && isReady()) {
+        playerRef.current.loadVideoById(data.videoId);
+        playerRef.current.playVideo();
+        loadedVideoIdRef.current = data.videoId;
+        return true;
+      }
       const res2 = await fetch(`/api/youtube-search?q=${encodeURIComponent(title + ' ' + artist + ' song')}`);
       const data2 = await res2.json();
-      if (data2.videoId && isReady()) { playerRef.current.loadVideoById(data2.videoId); playerRef.current.playVideo(); return true; }
+      if (data2.videoId && isReady()) {
+        playerRef.current.loadVideoById(data2.videoId);
+        playerRef.current.playVideo();
+        loadedVideoIdRef.current = data2.videoId;
+        return true;
+      }
     } catch (e) { console.error('YouTube search failed:', e); }
     return false;
   }
@@ -139,6 +166,7 @@ function useYouTubePlayer() {
     if (!isReady()) { pendingVideoIdRef.current = vId; return false; }
     playerRef.current.loadVideoById(vId);
     playerRef.current.playVideo();
+    loadedVideoIdRef.current = vId;
     return true;
   }
 
@@ -150,7 +178,7 @@ function useYouTubePlayer() {
     if (typeof d === 'number' && d > 0) setDuration(d);
   }
 
-  return { containerRef, ytReady, isPlaying, duration, currentTime, searchAndPlay, playVideoById, play, pause, seekTo, setVolume, onEndRef, updateNativeTime };
+  return { containerRef, silentAudioRef, ytReady, isPlaying, duration, currentTime, loadedVideoIdRef, searchAndPlay, playVideoById, play, pause, seekTo, setVolume, onEndRef, updateNativeTime };
 }
 
 // ─────────────────────── FORMAT TIME ───────────────────────
@@ -175,7 +203,7 @@ function decodeHtml(str) {
 // ─────────────────────── MAIN APP ───────────────────────
 export default function Home() {
   const yt = useYouTubePlayer();
-  const { user, loading: authLoading, logout, likedSongs, toggleLike, userPlaylists } = useAuth();
+  const { user, loading: authLoading, logout, likedSongs, likedSongObjects, toggleLike, userPlaylists } = useAuth();
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [playlistMenuSong, setPlaylistMenuSong] = useState(null);
   const [recentlyPlayed, setRecentlyPlayed] = useState([]); // array of song objects
@@ -206,6 +234,7 @@ export default function Home() {
   const [nativeIsPlaying, setNativeIsPlaying] = useState(false);
   const [shuffleEnabled, setShuffleEnabled] = useState(false);
   const [repeatMode, setRepeatMode] = useState('off');
+  const [optimisticPlaying, setOptimisticPlaying] = useState(false);
   const searchTimer = useRef(null);
 
   // Use refs for queue to avoid stale closures in next/prev
@@ -766,6 +795,7 @@ export default function Home() {
 
       if (resolvedVideoId) {
         const started = yt.playVideoById(resolvedVideoId);
+        // loadedVideoIdRef is updated inside playVideoById
         if (!started && yt.ytReady) {
           yt.searchAndPlay(song.title, song.artist);
         }
@@ -980,8 +1010,28 @@ export default function Home() {
       }
       return;
     }
-    if (yt.isPlaying) yt.pause();
-    else yt.play();
+
+    if (!currentSong) return;
+
+    if (yt.isPlaying) {
+      setOptimisticPlaying(false);
+      yt.pause();
+    } else {
+      // Flip optimistic state immediately so button shows ⏸ right away
+      setOptimisticPlaying(true);
+      // Check if the correct video is already loaded in the player
+      const expectedVideoId = currentSong.videoId || yt.loadedVideoIdRef.current;
+      if (expectedVideoId && yt.loadedVideoIdRef.current === expectedVideoId) {
+        // Correct video is loaded — just resume
+        yt.play();
+      } else if (expectedVideoId) {
+        // Wrong/no video loaded — load the correct one
+        yt.playVideoById(expectedVideoId);
+      } else {
+        // No videoId known — search for it
+        yt.searchAndPlay(currentSong.title, currentSong.artist);
+      }
+    }
   }
 
   function handleSeek(timeInSeconds) {
@@ -1018,8 +1068,13 @@ export default function Home() {
     }
   }
 
-  const activePlaying = nativeAndroid ? nativeIsPlaying : yt.isPlaying;
+  const activePlaying = nativeAndroid ? nativeIsPlaying : (yt.isPlaying || optimisticPlaying);
   const repeatLabel = repeatMode === 'off' ? '🔁' : repeatMode === 'one' ? '🔂' : '🔁';
+
+  // Reconcile optimistic state once YT confirms
+  useEffect(() => {
+    setOptimisticPlaying(false);
+  }, [yt.isPlaying]);
 
   // Gestures for full player
   const touchStartX = useRef(0);
@@ -1035,11 +1090,20 @@ export default function Home() {
   function loadMore() { loadSongs(page + 1, { search, genre, source }); }
 
   const displaySongs = search.trim() ? searchResults : songs;
-  // For liked view, filter cachedSongs by likedSongs set
-  const likedSongsList = cachedSongs.filter(s => {
-    const k = s.songId || s._id || s.videoId || `${s.title || ''}::${s.artist || ''}`;
-    return likedSongs.has(k);
-  });
+  // For liked view: match from cachedSongs first, then fill in any YT/unknown songs from likedSongObjects
+  const likedSongsList = (() => {
+    const fromCache = cachedSongs.filter(s => {
+      const k = s.songId || s._id || s.videoId || `${s.title || ''}::${s.artist || ''}`;
+      return likedSongs.has(k);
+    });
+    const cacheKeys = new Set(fromCache.map(s => s.songId || s._id || s.videoId || `${s.title || ''}::${s.artist || ''}`));
+    // Add liked song objects that aren't already covered by cachedSongs (e.g. YouTube songs)
+    const fromObjects = (likedSongObjects || []).filter(s => {
+      const k = s.songId || s._id || s.videoId || `${s.title || ''}::${s.artist || ''}`;
+      return likedSongs.has(k) && !cacheKeys.has(k);
+    });
+    return [...fromCache, ...fromObjects];
+  })();
   const activeSongs = (view === 'liked' && !search.trim())
     ? likedSongsList
     : (view === 'recent' && !search.trim())
@@ -1318,7 +1382,7 @@ export default function Home() {
                     <button
                       className="song-action-btn"
                       title={isLiked ? 'Unlike' : 'Like'}
-                      onClick={() => toggleLike(key)}
+                      onClick={() => toggleLike(key, song)}
                       style={{ color: isLiked ? '#1db954' : '#6b7280' }}
                     >
                       {isLiked ? '💚' : '🤍'}
@@ -1562,6 +1626,15 @@ export default function Home() {
       <div
         ref={yt.containerRef}
         style={{ position: 'fixed', bottom: 0, left: 0, width: '2px', height: '2px', opacity: 0, pointerEvents: 'none', zIndex: -1 }}
+        aria-hidden="true"
+      />
+      {/* Silent audio element — anchors Android mediaSession so notification panel appears */}
+      <audio
+        ref={yt.silentAudioRef}
+        src="/silence.mp3"
+        loop
+        playsInline
+        style={{ display: 'none' }}
         aria-hidden="true"
       />
 

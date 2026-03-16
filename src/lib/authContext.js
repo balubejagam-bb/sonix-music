@@ -7,6 +7,7 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [likedSongs, setLikedSongs] = useState(new Set());
+  const [likedSongObjects, setLikedSongObjects] = useState([]); // full song objects for liked songs
   const [userPlaylists, setUserPlaylists] = useState([]);
 
   useEffect(() => {
@@ -35,6 +36,11 @@ export function AuthProvider({ children }) {
       const res = await fetch('/api/user/liked', { headers: { Authorization: `Bearer ${token}` } });
       const data = await res.json();
       setLikedSongs(new Set(data.likedSongs || []));
+      // Also restore full song objects from localStorage if available
+      try {
+        const saved = localStorage.getItem('sonix_liked_objects');
+        if (saved) setLikedSongObjects(JSON.parse(saved));
+      } catch {}
     } catch {}
   };
 
@@ -46,18 +52,28 @@ export function AuthProvider({ children }) {
     } catch {}
   };
 
-  const toggleLike = useCallback(async (songId) => {
+  const toggleLike = useCallback(async (songId, songObject = null) => {
     const token = localStorage.getItem('sonix_token');
     if (!token) return false;
     const isLiked = likedSongs.has(songId);
-    // Optimistic update
+    // Optimistic update for ID set
     setLikedSongs(prev => {
       const next = new Set(prev);
       isLiked ? next.delete(songId) : next.add(songId);
       return next;
     });
+    // Optimistic update for song objects (so YT songs appear in liked list)
+    if (songObject) {
+      setLikedSongObjects(prev => {
+        const next = isLiked
+          ? prev.filter(s => (s.songId || s._id || s.videoId || `${s.title}::${s.artist}`) !== songId)
+          : [songObject, ...prev.filter(s => (s.songId || s._id || s.videoId || `${s.title}::${s.artist}`) !== songId)];
+        try { localStorage.setItem('sonix_liked_objects', JSON.stringify(next)); } catch {}
+        return next;
+      });
+    }
     try {
-      await fetch(`/api/user/like/${songId}`, {
+      await fetch(`/api/user/like/${encodeURIComponent(songId)}`, {
         method: isLiked ? 'DELETE' : 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -68,6 +84,15 @@ export function AuthProvider({ children }) {
         isLiked ? next.add(songId) : next.delete(songId);
         return next;
       });
+      if (songObject) {
+        setLikedSongObjects(prev => {
+          const next = isLiked
+            ? [songObject, ...prev.filter(s => (s.songId || s._id || s.videoId || `${s.title}::${s.artist}`) !== songId)]
+            : prev.filter(s => (s.songId || s._id || s.videoId || `${s.title}::${s.artist}`) !== songId);
+          try { localStorage.setItem('sonix_liked_objects', JSON.stringify(next)); } catch {}
+          return next;
+        });
+      }
     }
     return !isLiked;
   }, [likedSongs]);
@@ -133,8 +158,10 @@ export function AuthProvider({ children }) {
   const logout = async () => {
     await fetch('/api/auth/logout', { method: 'POST' });
     localStorage.removeItem('sonix_token');
+    localStorage.removeItem('sonix_liked_objects');
     setUser(null);
     setLikedSongs(new Set());
+    setLikedSongObjects([]);
     setUserPlaylists([]);
   };
 
@@ -143,7 +170,7 @@ export function AuthProvider({ children }) {
   return (
     <AuthContext.Provider value={{
       user, loading, login, register, logout, getToken,
-      likedSongs, toggleLike, userPlaylists, createPlaylist, addSongToPlaylist,
+      likedSongs, likedSongObjects, toggleLike, userPlaylists, createPlaylist, addSongToPlaylist,
       refreshPlaylists: () => fetchUserPlaylists(getToken()),
     }}>
       {children}
