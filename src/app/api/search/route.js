@@ -58,7 +58,7 @@ export async function GET(request) {
     // 1. Search MongoDB first
     const dbResults = await searchDB(db, q);
 
-    if (dbResults.length >= 5) {
+    if (dbResults.length >= 8) {
       // Enough DB results — skip YouTube entirely
       return NextResponse.json({ songs: dbResults, source: 'db', ytResults: [] });
     }

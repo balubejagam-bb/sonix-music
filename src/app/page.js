@@ -644,20 +644,22 @@ export default function Home() {
         if (data.songs?.length) setSearchResults(data.songs);
         else if (localHits.length === 0) setSearchResults([]);
 
-        // Auto-show YouTube results if DB had < 5 hits
+        // Always show YouTube results when available
         if (data.ytResults?.length) {
           setYtResults(data.ytResults);
-        } else if ((data.songs?.length || 0) < 5 && localHits.length < 5) {
-          // Still not enough — trigger YouTube search directly
-          setIsSearchingYT(true);
-          searchYouTubeFallback(q, true)
-            .then(d => {
-              // /api/youtube-search returns { results: [] } or array directly
-              const arr = Array.isArray(d) ? d : (d?.results || []);
-              if (arr.length) setYtResults(arr);
-            })
-            .catch(() => {})
-            .finally(() => setIsSearchingYT(false));
+        } else {
+          // Auto-trigger YouTube if DB returned < 8 results
+          const totalDB = data.songs?.length || localHits.length;
+          if (totalDB < 8) {
+            setIsSearchingYT(true);
+            searchYouTubeFallback(q, true)
+              .then(d => {
+                const arr = Array.isArray(d) ? d : (d?.results || []);
+                if (arr.length) setYtResults(arr);
+              })
+              .catch(() => {})
+              .finally(() => setIsSearchingYT(false));
+          }
         }
       } catch {
         // Fallback to local results only
@@ -793,20 +795,25 @@ export default function Home() {
       prefetchUpcomingVideoIds();
 
       if ('mediaSession' in navigator) {
+        const artwork = playableSong.thumbnail ||
+          playableSong.image ||
+          (playableSong.videoId ? `https://img.youtube.com/vi/${playableSong.videoId}/hqdefault.jpg` : '');
+
         navigator.mediaSession.metadata = new MediaMetadata({
-          title: playableSong.title,
-          artist: playableSong.artist,
+          title: playableSong.title || 'Unknown Track',
+          artist: playableSong.artist || 'Unknown Artist',
           album: playableSong.album || 'Sonix Music',
-          artwork: [{
-            src: playableSong.thumbnail || playableSong.image || `https://img.youtube.com/vi/${playableSong.videoId}/mqdefault.jpg`,
-            sizes: '512x512',
-            type: 'image/jpeg'
-          }]
+          artwork: artwork ? [
+            { src: artwork.replace('mqdefault', 'hqdefault').replace('sddefault', 'hqdefault'), sizes: '480x360', type: 'image/jpeg' },
+            { src: artwork, sizes: '320x180', type: 'image/jpeg' },
+          ] : [],
         });
+        navigator.mediaSession.playbackState = 'playing';
         navigator.mediaSession.setActionHandler('play', () => yt.play());
         navigator.mediaSession.setActionHandler('pause', () => yt.pause());
         navigator.mediaSession.setActionHandler('previoustrack', () => handlePrev());
         navigator.mediaSession.setActionHandler('nexttrack', () => handleNext());
+        navigator.mediaSession.setActionHandler('seekto', (d) => { if (d.seekTime != null) handleSeek(d.seekTime); });
       }
 
       bindNativeMediaControls();
@@ -824,6 +831,10 @@ export default function Home() {
   useEffect(() => {
     if (!currentSong) return;
     syncNativeMediaControls(currentSong, yt.isPlaying);
+    // Keep mediaSession playbackState in sync (shows correct icon in notification)
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.playbackState = yt.isPlaying ? 'playing' : 'paused';
+    }
   }, [currentSong, yt.isPlaying]);
 
   useEffect(() => {
@@ -1346,7 +1357,15 @@ export default function Home() {
                     <div 
                       key={v.videoId} 
                       className={`song-row fade-in ${currentSong?.videoId === v.videoId ? 'playing' : ''}`}
-                      onClick={() => playSongDirect({ ...v, image: v.thumbnail }, ytResults)}
+                      onClick={() => playSongDirect({
+                        ...v,
+                        image: v.thumbnail || `https://img.youtube.com/vi/${v.videoId}/hqdefault.jpg`,
+                        source: 'youtube',
+                      }, ytResults.map(r => ({
+                        ...r,
+                        image: r.thumbnail || `https://img.youtube.com/vi/${r.videoId}/hqdefault.jpg`,
+                        source: 'youtube',
+                      })))}
                     >
                       <span className="song-num">🌐</span>
                       <img className="song-img" src={v.thumbnail} alt="" loading="lazy" />
