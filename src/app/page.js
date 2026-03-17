@@ -309,9 +309,11 @@ export default function Home() {
     initNativeBackground();
 
     const onVisibilityChange = async () => {
-      // Pause on tab/app switch for web (not native Android — handled by Media3)
+      // Only pause on mobile web when switching apps — desktop should keep playing
+      // when Chrome is minimized or another window is focused
       if (document.hidden && !nativeAndroid) {
-        yt.pause();
+        const isMobileWeb = /Mobi|Android/i.test(navigator.userAgent) && !Capacitor.isNativePlatform();
+        if (isMobileWeb) yt.pause();
       }
     };
 
