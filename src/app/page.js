@@ -712,10 +712,13 @@ export default function Home() {
     setIsSearchingYT(false);
   }
 
+  const [voiceTranscript, setVoiceTranscript] = useState('');
+
   function startVoiceSearch() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) { alert('Voice search not supported on this browser.'); return; }
 
+    // If already listening, stop it
     if (isListening && recognitionRef.current) {
       recognitionRef.current.stop();
       return;
@@ -723,18 +726,42 @@ export default function Home() {
 
     const recognition = new SpeechRecognition();
     recognition.lang = 'en-US';
-    recognition.interimResults = false;
+    recognition.interimResults = true;   // show live transcript
+    recognition.continuous = false;      // stop after first utterance (like Google)
     recognition.maxAlternatives = 1;
     recognitionRef.current = recognition;
 
-    recognition.onstart = () => setIsListening(true);
-    recognition.onend = () => setIsListening(false);
-    recognition.onerror = () => setIsListening(false);
+    setVoiceTranscript('');
+    setIsListening(true);
+
     recognition.onresult = (e) => {
-      const transcript = e.results[0][0].transcript;
-      setSearch(transcript);
-      setView('search');
+      let interim = '';
+      let final = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) final += t;
+        else interim += t;
+      }
+      // Show live interim text in the overlay
+      setVoiceTranscript(final || interim);
+      if (final) {
+        // Final result — fill search and close overlay
+        setSearch(final.trim());
+        setView('search');
+        recognition.stop();
+      }
     };
+
+    recognition.onerror = () => {
+      setIsListening(false);
+      setVoiceTranscript('');
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+      setVoiceTranscript('');
+    };
+
     recognition.start();
   }
 
@@ -1706,6 +1733,22 @@ export default function Home() {
 
       {/* Auth Modal */}
       {showAuthModal && <AuthModal onClose={() => setShowAuthModal(false)} />}
+
+      {/* Voice Search Overlay — Google-style */}
+      {isListening && (
+        <div className="voice-overlay" onClick={() => { recognitionRef.current?.stop(); }}>
+          <div className="voice-modal" onClick={e => e.stopPropagation()}>
+            <div className="voice-waves">
+              <span></span><span></span><span></span><span></span><span></span>
+            </div>
+            <p className="voice-label">
+              {voiceTranscript ? `"${voiceTranscript}"` : 'Listening...'}
+            </p>
+            <p className="voice-hint">Speak now — tap anywhere to cancel</p>
+            <button className="voice-cancel" onClick={() => recognitionRef.current?.stop()}>✕ Cancel</button>
+          </div>
+        </div>
+      )}
 
       {/* Add to Playlist Menu */}
       {playlistMenuSong && (
