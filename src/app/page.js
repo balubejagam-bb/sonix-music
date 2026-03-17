@@ -738,29 +738,39 @@ export default function Home() {
     recognition.onresult = (e) => {
       let interim = '';
       let final = '';
-      for (let i = e.resultIndex; i < e.results.length; i++) {
+      for (let i = 0; i < e.results.length; i++) {
         const t = e.results[i][0].transcript;
         if (e.results[i].isFinal) final += t;
         else interim += t;
       }
-      if (final) finalTranscriptRef.current = final.trim();
-      // Show live text in overlay
-      setVoiceTranscript(finalTranscriptRef.current || interim);
+      // Always keep the best text we have — final preferred, interim as fallback
+      const best = (final || interim).trim();
+      if (best) finalTranscriptRef.current = best;
+      setVoiceTranscript(best);
     };
 
-    recognition.onerror = () => {
-      setIsListening(false);
-      setVoiceTranscript('');
-    };
-
-    recognition.onend = () => {
-      setIsListening(false);
-      setVoiceTranscript('');
-      // Apply the transcript to search AFTER recognition ends
+    recognition.onerror = (e) => {
+      // On no-speech, still use whatever interim we captured
       const result = finalTranscriptRef.current;
+      setIsListening(false);
+      setVoiceTranscript('');
       if (result) {
         setSearch(result);
         setView('search');
+        finalTranscriptRef.current = '';
+      }
+    };
+
+    recognition.onend = () => {
+      const result = finalTranscriptRef.current;
+      setIsListening(false);
+      setVoiceTranscript('');
+      if (result) {
+        // Small timeout so React flushes the overlay close before setting search
+        setTimeout(() => {
+          setSearch(result);
+          setView('search');
+        }, 50);
         finalTranscriptRef.current = '';
       }
     };
