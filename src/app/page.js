@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { LocalNotifications } from '@capacitor/local-notifications';
+import { BackgroundMode as NativeBackgroundMode } from '@anuradev/capacitor-background-mode';
 import { useAuth } from '@/lib/authContext';
 import AuthModal from '@/components/AuthModal';
 import AddToPlaylistMenu from '@/components/AddToPlaylistMenu';
@@ -19,18 +20,10 @@ function clientApiPath(path) {
   return isNativeAndroid() ? `https://sonix-music.vercel.app${path}` : path;
 }
 
-// Ensure BackgroundMode doesn't crash SSR or Capacitor init
-let BackgroundMode = null;
-async function getBackgroundMode() {
-  if (BackgroundMode) return BackgroundMode;
+function getBackgroundMode() {
   if (typeof window === 'undefined') return null;
-  try {
-    const m = await import('@anuradev/capacitor-background-mode');
-    BackgroundMode = m.BackgroundMode;
-    return BackgroundMode;
-  } catch(e) {
-    return null;
-  }
+  if (!isNativeAndroid()) return null;
+  return NativeBackgroundMode || null;
 }
 
 function getMusicControls() {
@@ -431,6 +424,7 @@ export default function Home() {
   const controlsBoundRef = useRef(false);
   const nativeControlsEnabledRef = useRef(true);
   const lastNativeTrackKeyRef = useRef(null);
+  const lastNativeActionRef = useRef({ action: '', at: 0 });
   const nativeAndroid = isNativeAndroid();
 
   function apiPath(path) {
@@ -439,6 +433,11 @@ export default function Home() {
 
   function canPlayNatively(song) {
     return nativeAndroid && typeof song?.url === 'string' && /^https?:\/\//i.test(song.url);
+  }
+
+  function openAuthModal() {
+    setMobileMenuOpen(false);
+    setShowAuthModal(true);
   }
 
   function isLikelyDirectAudioUrl(url = '') {
@@ -487,7 +486,7 @@ export default function Home() {
       if (nativeAndroid) {
         try {
           await LocalNotifications.requestPermissions();
-          const bg = await getBackgroundMode();
+          const bg = getBackgroundMode();
           if (bg) {
             await bg.enable();
             if (typeof bg.disableWebViewOptimizations === 'function') {
@@ -543,7 +542,7 @@ export default function Home() {
     const handleVisibility = async () => {
       if (document.hidden) {
         console.log('[Sonix] App backgrounded. Ensuring playback stability.');
-        const bg = await getBackgroundMode();
+        const bg = getBackgroundMode();
         if (bg) bg.enable();
 
         if (nativeAndroid && currentSong && nativeShouldPlayRef.current && !nativeIsPlaying) {
@@ -682,16 +681,30 @@ export default function Home() {
       });
 
       const actionListener = NativeMusicPlayer.addListener('onWebAction', (res) => {
-        if (res.action === 'next') handleNext();
-        else if (res.action === 'previous') handlePrev();
-        else if (res.action === 'play') {
-          NativeMusicPlayer.resume().catch(() => {});
-          setNativeIsPlaying(true);
-          nativeShouldPlayRef.current = true;
+        const action = res?.action;
+        if (!action) return;
+
+        // Avoid play/pause feedback loops from rapid duplicate native actions.
+        const now = Date.now();
+        if (
+          lastNativeActionRef.current.action === action &&
+          now - lastNativeActionRef.current.at < 700
+        ) {
+          return;
         }
-        else if (res.action === 'pause') {
-          NativeMusicPlayer.pause().catch(() => {});
+        lastNativeActionRef.current = { action, at: now };
+
+        if (action === 'next') {
+          handleNext();
+        } else if (action === 'previous') {
+          handlePrev();
+        } else if (action === 'play') {
+          setNativeIsPlaying(true);
+          setOptimisticPlaying(true);
+          nativeShouldPlayRef.current = true;
+        } else if (action === 'pause') {
           setNativeIsPlaying(false);
+          setOptimisticPlaying(false);
           nativeShouldPlayRef.current = false;
         }
       });
@@ -1295,12 +1308,6 @@ export default function Home() {
             });
             if (isStale()) return;
 
-            await NativeMusicPlayer.updateMeta({
-              title: songWithUrl.title || 'Unknown Track',
-              artist: songWithUrl.artist || 'Unknown Artist',
-              isPlaying: true,
-            }).catch(() => {});
-
             queueRef.current = queueSource.length ? queueSource : [songWithUrl];
             queueIndexRef.current = Math.max(0, queueSource.findIndex(s => songKey(s) === key));
             setCurrentSong(songWithUrl);
@@ -1435,14 +1442,6 @@ export default function Home() {
     // Keep mediaSession playbackState in sync (shows correct icon in notification)
     if ('mediaSession' in navigator) {
       navigator.mediaSession.playbackState = yt.isPlaying ? 'playing' : 'paused';
-    }
-    // Keep Android notification play/pause icon in sync for YT songs
-    if (nativeAndroid && currentSong) {
-      NativeMusicPlayer.updateMeta({
-        title: currentSong.title || 'Unknown Track',
-        artist: currentSong.artist || 'Unknown Artist',
-        isPlaying: yt.isPlaying,
-      }).catch(() => {});
     }
   }, [currentSong, yt.isPlaying]);
 
@@ -1662,20 +1661,10 @@ export default function Home() {
       try {
         if (nativeIsPlaying) {
           await NativeMusicPlayer.pause();
-          await NativeMusicPlayer.updateMeta({
-            title: currentSong.title || 'Unknown Track',
-            artist: currentSong.artist || 'Unknown Artist',
-            isPlaying: false,
-          }).catch(() => {});
           setNativeIsPlaying(false);
           nativeShouldPlayRef.current = false;
         } else {
           await NativeMusicPlayer.resume();
-          await NativeMusicPlayer.updateMeta({
-            title: currentSong.title || 'Unknown Track',
-            artist: currentSong.artist || 'Unknown Artist',
-            isPlaying: true,
-          }).catch(() => {});
           setNativeIsPlaying(true);
           nativeShouldPlayRef.current = true;
         }
@@ -1979,7 +1968,7 @@ export default function Home() {
                 <span className="icon">👤</span> {user.name.split(' ')[0]} (Logout)
               </button>
             ) : (
-              <button className="nav-item active" onClick={() => setShowAuthModal(true)}>
+              <button className="nav-item active" onClick={openAuthModal}>
                 <span className="icon">🔐</span> Sign In / Join
               </button>
             )}
@@ -2612,7 +2601,7 @@ export default function Home() {
             🎵 Log in to like songs, create playlists &amp; sync across devices
           </span>
           <button
-            onClick={() => setShowAuthModal(true)}
+            onClick={openAuthModal}
             style={{ background: '#fff', color: '#7c3aed', border: 'none', borderRadius: 20, padding: '5px 16px', fontWeight: 700, fontSize: 13, cursor: 'pointer', flexShrink: 0 }}
           >
             Log In

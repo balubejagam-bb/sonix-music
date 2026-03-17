@@ -205,7 +205,6 @@ public class MusicPlaybackService extends MediaSessionService {
                 public MediaSession.ConnectionResult onConnect(
                         MediaSession session, ControllerInfo controller) {
                     Player.Commands cmds = Player.Commands.EMPTY.buildUpon()
-                        .add(Player.COMMAND_PLAY_PAUSE)
                         .add(Player.COMMAND_SEEK_TO_NEXT)
                         .add(Player.COMMAND_SEEK_TO_PREVIOUS)
                         .add(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
@@ -238,15 +237,6 @@ public class MusicPlaybackService extends MediaSessionService {
                             player.play();
                         }
                         return androidx.media3.session.SessionResult.RESULT_SUCCESS;
-                    }
-                    if (playerCommand == Player.COMMAND_PLAY_PAUSE) {
-                        if (ytMode) {
-                            // Relay to web — web controls the YT iframe
-                            ytPlaying = !ytPlaying;
-                            MusicPlayerPlugin.triggerWebAction(ytPlaying ? "play" : "pause");
-                            updateForegroundNotification(currentTitle, currentArtist, ytPlaying);
-                            return androidx.media3.session.SessionResult.RESULT_SUCCESS;
-                        }
                     }
                     return androidx.media3.session.SessionResult.RESULT_SUCCESS;
                 }
