@@ -77,56 +77,77 @@ async function getYouTubeStream(title, artist) {
     'https://inv.nadeko.net',
     'https://invidious.nerdvpn.de',
     'https://invidious.privacyredirect.com',
+    'https://invidious.protokolla.fi',
+    'https://yt.artemislena.eu',
+    'https://invidious.perennialte.ch',
   ];
   const PIPED_INSTANCES = [
     'https://pipedapi.kavin.rocks',
     'https://pipedapi.adminforge.de',
+    'https://watchapi.whatever.social',
+    'https://pipedapi.in.projectsegfau.lt',
     'https://api.piped.yt',
   ];
 
   try {
-    const query = `${title} ${artist} official audio`.trim();
+    const isPodcast = title.toLowerCase().includes('podcast') || artist.toLowerCase().includes('podcast');
+    const suffix = isPodcast ? '' : ' official audio';
+    const query = `${title} ${artist}${suffix}`.trim();
     let videoId = null;
 
-    for (const instance of INVIDIOUS_INSTANCES) {
+    // Try multiple instances in parallel for search
+    const searchTasks = INVIDIOUS_INSTANCES.slice(0, 4).map(async (instance) => {
       try {
         const res = await fetch(
           `${instance}/api/v1/search?q=${encodeURIComponent(query)}&type=video&sort_by=relevance`,
           { signal: AbortSignal.timeout(3000), headers: { 'Accept': 'application/json' } }
         );
-        if (!res.ok) continue;
+        if (!res.ok) return null;
         const data = await res.json();
         const first = (data || []).find(v => v.type === 'video' && v.videoId);
-        if (first) { videoId = first.videoId; break; }
-      } catch { continue; }
+        return first ? first.videoId : null;
+      } catch { return null; }
+    });
+
+    const searchResults = await Promise.allSettled(searchTasks);
+    for (const r of searchResults) {
+      if (r.status === 'fulfilled' && r.value) { videoId = r.value; break; }
     }
 
     if (!videoId) return null;
 
-    for (const instance of INVIDIOUS_INSTANCES) {
-      try {
-        const res = await fetch(
-          `${instance}/api/v1/videos/${videoId}?fields=adaptiveFormats`,
-          { signal: AbortSignal.timeout(4000), headers: { 'Accept': 'application/json' } }
-        );
-        if (!res.ok) continue;
-        const data = await res.json();
-        const audioFormats = (data.adaptiveFormats || [])
-          .filter(f => f.type?.includes('audio') && f.url)
-          .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-        if (audioFormats.length > 0) return audioFormats[0].url;
-      } catch { continue; }
-    }
+    // Try multiple instances in parallel for stream resolution
+    const streamTasks = [
+      ...INVIDIOUS_INSTANCES.slice(0, 3).map(async (instance) => {
+        try {
+          const res = await fetch(
+            `${instance}/api/v1/videos/${videoId}?fields=adaptiveFormats`,
+            { signal: AbortSignal.timeout(4000), headers: { 'Accept': 'application/json' } }
+          );
+          if (!res.ok) return null;
+          const data = await res.json();
+          const audioFormats = (data.adaptiveFormats || [])
+            .filter(f => f.type?.includes('audio') && f.url)
+            .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+          return audioFormats.length > 0 ? audioFormats[0].url : null;
+        } catch { return null; }
+      }),
+      ...PIPED_INSTANCES.slice(0, 3).map(async (instance) => {
+        try {
+          const res = await fetch(`${instance}/streams/${videoId}`, { signal: AbortSignal.timeout(4000) });
+          if (!res.ok) return null;
+          const data = await res.json();
+          if (data.audioStreams?.length > 0) {
+            return data.audioStreams.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0].url;
+          }
+          return null;
+        } catch { return null; }
+      })
+    ];
 
-    for (const instance of PIPED_INSTANCES) {
-      try {
-        const res = await fetch(`${instance}/streams/${videoId}`, { signal: AbortSignal.timeout(4000) });
-        if (!res.ok) continue;
-        const data = await res.json();
-        if (data.audioStreams?.length > 0) {
-          return data.audioStreams.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0].url;
-        }
-      } catch { continue; }
+    const streamResults = await Promise.allSettled(streamTasks);
+    for (const r of streamResults) {
+      if (r.status === 'fulfilled' && r.value) return r.value;
     }
   } catch (e) {
     console.error('YouTube stream error:', e);
