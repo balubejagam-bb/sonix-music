@@ -58,6 +58,7 @@ function useYouTubePlayer() {
   const onEndRef        = useRef(null);
   const pendingVideoIdRef = useRef(null);
   const loadedVideoIdRef  = useRef(null);
+  const streamUrlRef      = useRef(null);
 
   // Stable refs so event handlers inside YT.Player never go stale
   const startTimerRef = useRef(null);
@@ -402,6 +403,13 @@ export default function Home() {
   const nativeControlsEnabledRef = useRef(true);
   const lastNativeTrackKeyRef = useRef(null);
   const nativeAndroid = isNativeAndroid();
+  const API_ORIGIN = nativeAndroid ? 'https://sonix-music.vercel.app' : '';
+
+  function apiPath(path) {
+    if (typeof path !== 'string') return path;
+    if (!path.startsWith('/')) return path;
+    return `${API_ORIGIN}${path}`;
+  }
 
   function canPlayNatively(song) {
     return nativeAndroid && typeof song?.url === 'string' && /^https?:\/\//i.test(song.url);
@@ -480,59 +488,43 @@ export default function Home() {
     initApp();
   }, []);
 
-  // ───── Seamless Audio/Video Engine Switching ─────
-  useEffect(() => {
-    if (!currentSong || isLoadingSong) return;
-    
-    // Determine which engine should be playing
-    const vid = currentSong.videoId;
-    const shouldBeVideo = !!vid;
-
-    if (shouldBeVideo && !videoEnabled) {
-      // Switched TO Video: If audio engine is playing, transfer to IFrame
-      const a = yt.audioElement;
-      if (a && a.src && a.src !== window.location.href && !a.paused) {
-        const time = a.currentTime;
-        a.pause();
-        a.src = '';
-        setVideoEnabled(true);
-        yt.playVideoById(vid);
-        // YT load takes a bit, seek after it starts playing via onStateChange or just try now
-        setTimeout(() => yt.seekTo(time), 500);
-      } else if (!videoEnabled) {
-        // If it should be video but isn't enabled, enable it and play
-        setVideoEnabled(true);
-        yt.playVideoById(vid);
-      }
-    } else if (!shouldBeVideo && videoEnabled) {
-      // Switched TO Audio: If IFrame is playing, transfer to Direct Stream
-      if (yt.isPlaying && !yt.audioElement?.src) {
-        const time = yt.currentTime;
-        yt.pause();
-        setVideoEnabled(false);
-        fetch(`/api/yt-stream?videoId=${encodeURIComponent(vid)}`)
-          .then(r => r.json())
-          .then(data => {
-            if (data.streamUrl) {
-              yt.playStream(data.streamUrl);
-              setTimeout(() => yt.seekTo(time), 100);
-            }
-          });
-      } else if (videoEnabled) {
-        // If it should be audio but video is enabled, disable video
-        setVideoEnabled(false);
-      }
-    }
-  }, [currentSong, isLoadingSong, videoEnabled]); // Keep videoEnabled here to react to its changes for engine transfer
-
   // ───── Playback watchdog (keep background playing) ─────
   useEffect(() => {
-    const handleVisibility = () => {
-      if (!document.hidden && (optimisticPlaying || yt.isPlaying)) {
-        // Tab came to foreground - ensure engines are active
-        yt.play();
-        if (yt.silentAudioRef.current && yt.silentAudioRef.current.paused) {
-          yt.silentAudioRef.current.play().catch(() => {});
+    const handleVisibility = async () => {
+      if (document.hidden) {
+        console.log('[Sonix] App backgrounded. Ensuring playback stability.');
+        const bg = await getBackgroundMode();
+        if (bg) bg.enable();
+        
+        // If we are playing a video in the foreground, it will likely pause.
+        // Transfer to native background audio if possible.
+        if (yt.isPlaying && !nativeIsPlaying && currentSong?.videoId) {
+           const time = yt.currentTime;
+           const vid = currentSong.videoId;
+           
+           // If on Android, try to transition to native player
+           if (nativeAndroid) {
+             try {
+               const res = await fetch(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(vid)}`));
+               const data = await res.json();
+               if (data.streamUrl) {
+                 yt.pause();
+                 await NativeMusicPlayer.playQueue({
+                   queue: [{ url: data.streamUrl, title: currentSong.title, artist: currentSong.artist, artwork: currentSong.image || '' }],
+                   index: 0
+                 });
+                 NativeMusicPlayer.seekTo({ position: time * 1000 });
+                 setNativeIsPlaying(true);
+               }
+             } catch(e) {}
+           }
+        }
+      } else {
+        console.log('[Sonix] App foregrounded. Syncing states.');
+        if (optimisticPlaying || yt.isPlaying || nativeIsPlaying) {
+          if (yt.silentAudioRef.current && yt.silentAudioRef.current.paused) {
+            yt.silentAudioRef.current.play().catch(() => {});
+          }
         }
       }
     };
@@ -573,7 +565,7 @@ export default function Home() {
     const token = localStorage.getItem('sonix_token');
     if (!token) return;
 
-    fetch('/api/user/recent', { headers: { Authorization: `Bearer ${token}` } })
+    fetch(apiPath('/api/user/recent'), { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.json())
       .then(data => {
         // Use full song objects if server has them
@@ -659,7 +651,7 @@ export default function Home() {
       try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 6000);
-        const res = await fetch(url, { signal: controller.signal });
+        const res = await fetch(apiPath(url), { signal: controller.signal });
         clearTimeout(timer);
         if (!res.ok) continue;
         return await res.json();
@@ -783,7 +775,7 @@ export default function Home() {
 
   async function loadPlaylists() {
     try {
-      const res = await fetch('/api/playlists');
+      const res = await fetch(apiPath('/api/playlists'));
       const data = await res.json();
       setPlaylists(data.playlists || []);
     } catch (e) { console.error('Failed to load playlists', e); }
@@ -798,13 +790,17 @@ export default function Home() {
         ...(options.genre && { genre: options.genre }),
         ...(options.source && options.source !== 'all' && { source: options.source }),
       });
-      const res = await fetch(`/api/songs?${params}`);
+      const res = await fetch(apiPath(`/api/songs?${params}`));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (p === 1) { setSongs(data.songs || []); }
       else { setSongs(prev => [...prev, ...(data.songs || [])]); }
       setTotalSongs(data.total || 0);
       setPage(p);
-    } catch (e) { console.error('Failed to load songs', e); }
+    } catch (e) { 
+      console.error('Failed to load songs:', e);
+      if (p === 1) setSongs([]); // Clear if initial load fails
+    }
     setLoading(false);
   }
 
@@ -815,7 +811,7 @@ export default function Home() {
         page: p, limit: 50,
         ...(options.search && { search: options.search }),
       });
-      const res = await fetch(`/api/podcasts?${params}`);
+      const res = await fetch(apiPath(`/api/podcasts?${params}`));
       const data = await res.json();
       if (p === 1) { setPodcasts(data.podcasts || []); }
       else { setPodcasts(prev => [...prev, ...(data.podcasts || [])]); }
@@ -884,7 +880,7 @@ export default function Home() {
       if (!nextSong) continue;
       // On Android: also warm the stream cache
       if (nativeAndroid && nextSong.videoId) {
-        fetch(`/api/yt-stream?videoId=${encodeURIComponent(nextSong.videoId)}`).catch(() => {});
+        fetch(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(nextSong.videoId)}`)).catch(() => {});
       }
       resolveSongVideoId(nextSong).catch(() => {});
     }
@@ -892,7 +888,7 @@ export default function Home() {
 
   async function backgroundCache() {
     try {
-      const res = await fetch('/api/songs?all=true');
+      const res = await fetch(apiPath('/api/songs?all=true'));
       const data = await res.json();
       const allSongs = data.songs || [];
       setCachedSongs(allSongs);
@@ -942,7 +938,7 @@ export default function Home() {
       setSearchResults(localHits);
 
       // DB + YT + Podcasts in parallel
-      const dbPromise = fetch(`/api/search?q=${encodeURIComponent(q)}`)
+      const dbPromise = fetch(apiPath(`/api/search?q=${encodeURIComponent(q)}`))
         .then(r => r.json())
         .catch(() => null);
 
@@ -950,7 +946,7 @@ export default function Home() {
         .then(d => Array.isArray(d) ? d : (d?.results || []))
         .catch(() => []);
 
-      const podcastPromise = fetch(`/api/podcasts?search=${encodeURIComponent(q)}`)
+      const podcastPromise = fetch(apiPath(`/api/podcasts?search=${encodeURIComponent(q)}`))
         .then(r => r.json())
         .catch(() => ({ podcasts: [] }));
 
@@ -1111,7 +1107,7 @@ export default function Home() {
           // Path 1: DB song with a direct URL (JioSaavn etc.)
           if (song.url && /^https?:\/\//i.test(song.url)) {
             const res = await fetch(
-              `/api/stream?url=${encodeURIComponent(song.url)}&title=${encodeURIComponent(song.title || '')}&artist=${encodeURIComponent(song.artist || '')}`
+              apiPath(`/api/stream?url=${encodeURIComponent(song.url)}&title=${encodeURIComponent(song.title || '')}&artist=${encodeURIComponent(song.artist || '')}`)
             );
             const data = await res.json();
             if (data.streamUrl) streamUrl = data.streamUrl;
@@ -1124,7 +1120,7 @@ export default function Home() {
               const suffix = song.type === 'podcast' || song.source === 'podcast' ? '' : ' official audio';
               const query = `${song.title || ''} ${song.artist || ''}${suffix}`.trim();
               try {
-                const res = await fetch(`/api/youtube-search?q=${encodeURIComponent(query)}`);
+                const res = await fetch(apiPath(`/api/youtube-search?q=${encodeURIComponent(query)}`));
                 const data = await res.json();
                 if (data.videoId) videoId = data.videoId;
               } catch {}
@@ -1133,7 +1129,7 @@ export default function Home() {
             // Now resolve stream URL from videoId via dedicated route
             if (videoId) {
               try {
-                const res = await fetch(`/api/yt-stream?videoId=${encodeURIComponent(videoId)}`);
+                const res = await fetch(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(videoId)}`));
                 const data = await res.json();
                 if (data.streamUrl) streamUrl = data.streamUrl;
               } catch {}
@@ -1142,7 +1138,7 @@ export default function Home() {
             // Last resort: old stream=true path
             if (!streamUrl && videoId) {
               try {
-                const res = await fetch(`/api/youtube-search?q=${encodeURIComponent((song.title || '') + ' ' + (song.artist || ''))}&stream=true`);
+                const res = await fetch(apiPath(`/api/youtube-search?q=${encodeURIComponent((song.title || '') + ' ' + (song.artist || ''))}&stream=true`));
                 const data = await res.json();
                 if (data.videoId) videoId = data.videoId;
                 if (data.streamUrl) streamUrl = data.streamUrl;
@@ -1229,12 +1225,24 @@ export default function Home() {
       setCurrentSong(playableSong);
       setNativeIsPlaying(false);
       
-      // Automatically enable video for YT content, disable for non-YT
+      // Audio-first UX: only load iframe video when user explicitly chooses Video mode.
       if (vId) {
-        setVideoEnabled(true);
-        yt.playVideoById(vId);
+        if (videoEnabled) {
+          yt.playVideoById(vId);
+        } else {
+          try {
+            const res = await fetch(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(vId)}`));
+            const data = await res.json();
+            if (data?.streamUrl) {
+              yt.playStream(data.streamUrl);
+            } else {
+              yt.playVideoById(vId);
+            }
+          } catch {
+            yt.playVideoById(vId);
+          }
+        }
       } else {
-        setVideoEnabled(false);
         yt.searchAndPlay(song.title || '', song.artist || '');
       }
 
@@ -1254,7 +1262,7 @@ export default function Home() {
       const token = typeof window !== 'undefined' ? localStorage.getItem('sonix_token') : null;
       if (token) {
         const sid = encodeURIComponent(songKey(playableSong));
-        fetch(`/api/user/recent/${sid}`, {
+        fetch(apiPath(`/api/user/recent/${sid}`), {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(playableSong),
@@ -1365,7 +1373,7 @@ export default function Home() {
     setLoading(true);
     try {
       const col = pl.collection || 'songs';
-      const res = await fetch(`/api/songs?source=${col === 'songs' ? 'jiosaavn' : 'spotify'}&limit=50`);
+      const res = await fetch(apiPath(`/api/songs?source=${col === 'songs' ? 'jiosaavn' : 'spotify'}&limit=50`));
       const data = await res.json();
       let filtered = data.songs;
       if (pl.songIds?.length) {
@@ -1405,7 +1413,7 @@ export default function Home() {
     // Fallback: fetch playlist details from API
     try {
       const token = localStorage.getItem('sonix_token');
-      const res = await fetch(`/api/playlist/${pl._id}`, {
+      const res = await fetch(apiPath(`/api/playlist/${pl._id}`), {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
@@ -1442,6 +1450,39 @@ export default function Home() {
     }
   }
 
+  async function switchToVideoMode() {
+    if (!currentSong?.videoId) return;
+    const resumeAt = yt.currentTime || 0;
+    const a = yt.audioElement;
+    if (a && a.src && a.src !== window.location.href) {
+      try { a.pause(); } catch {}
+      a.src = '';
+    }
+    setVideoEnabled(true);
+    yt.playVideoById(currentSong.videoId);
+    if (resumeAt > 0) {
+      setTimeout(() => yt.seekTo(resumeAt), 350);
+    }
+  }
+
+  async function switchToAudioMode() {
+    if (!currentSong?.videoId) {
+      setVideoEnabled(false);
+      return;
+    }
+    const resumeAt = yt.currentTime || 0;
+    yt.pause();
+    setVideoEnabled(false);
+    try {
+      const res = await fetch(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(currentSong.videoId)}`));
+      const data = await res.json();
+      if (data?.streamUrl) {
+        yt.playStream(data.streamUrl);
+        if (resumeAt > 0) setTimeout(() => yt.seekTo(resumeAt), 120);
+      }
+    } catch {}
+  }
+
   async function handlePlayPauseToggle() {
     if (nativeAndroid && currentSong) {
       try {
@@ -1469,18 +1510,29 @@ export default function Home() {
       // which can be stale after navigating away and back
       const videoId = currentSong.videoId;
       if (videoId) {
-        if (yt.loadedVideoIdRef.current === videoId) {
-          // Same video already loaded — just resume
-          yt.play();
+        if (videoEnabled) {
+          if (yt.loadedVideoIdRef.current === videoId) {
+            yt.play();
+          } else {
+            yt.playVideoById(videoId);
+          }
         } else {
-          // Load and play the correct video
-          yt.playVideoById(videoId);
+          const a = yt.audioElement;
+          if (a && a.src && a.src !== window.location.href) {
+            yt.play();
+          } else {
+            try {
+              const res = await fetch(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(videoId)}`));
+              const data = await res.json();
+              if (data?.streamUrl) yt.playStream(data.streamUrl);
+              else yt.playVideoById(videoId);
+            } catch {
+              yt.playVideoById(videoId);
+            }
+          }
         }
-        setVideoEnabled(true); // Ensure video is enabled for YT content
       } else {
-        // DB song with no videoId cached — search YT
         yt.searchAndPlay(currentSong.title, currentSong.artist, currentSong.type || 'song');
-        setVideoEnabled(false); // Ensure video is disabled for non-YT content
       }
     }
   }
@@ -1514,14 +1566,14 @@ export default function Home() {
 
   // When full player opens and song is set but not playing — auto-resume
   useEffect(() => {
-    if (!fullPlayerOpen || !currentSong || nativeAndroid) return;
+    if (!fullPlayerOpen || !currentSong || nativeAndroid || !videoEnabled) return;
     // If nothing is loaded or wrong video is loaded, reload it
     const videoId = currentSong.videoId;
     if (!videoId) return;
     if (!yt.isPlaying && yt.loadedVideoIdRef.current !== videoId) {
       yt.playVideoById(videoId);
     }
-  }, [fullPlayerOpen]);
+  }, [fullPlayerOpen, videoEnabled, currentSong, nativeAndroid, yt.isPlaying]);
 
   async function handleToggleShuffle() {
     const next = !shuffleEnabled;
@@ -1683,7 +1735,7 @@ export default function Home() {
                     artist: 'Self Upload',
                     album: 'My Library'
                   }));
-                  const res = await fetch('/api/upload', {
+                  const res = await fetch(apiPath('/api/upload'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(songData)
@@ -2144,8 +2196,8 @@ export default function Home() {
             <div className="sp-header">
               <button className="sp-down-btn" onClick={() => setFullPlayerOpen(false)}>▼</button>
               <div className="sp-mode-switch">
-                <button className={!videoEnabled ? 'active' : ''} onClick={() => setVideoEnabled(false)}>Audio</button>
-                <button className={videoEnabled ? 'active' : ''} onClick={() => setVideoEnabled(true)}>Video</button>
+                <button className={!videoEnabled ? 'active' : ''} onClick={switchToAudioMode}>Audio</button>
+                <button className={videoEnabled ? 'active' : ''} onClick={switchToVideoMode}>Video</button>
               </div>
               <span style={{ width: 36 }} />
             </div>

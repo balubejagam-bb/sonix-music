@@ -2300,8 +2300,8 @@ html, body {
 /* ── YouTube Video Container Logic ── */
 .yt-video-container {
   position: fixed;
-  bottom: 0px;
-  right: 0px;
+  bottom: 0;
+  right: 0;
   width: 200px;
   height: 200px;
   border-radius: 8px;
@@ -2327,10 +2327,10 @@ html, body {
 .yt-video-container.in-full {
   position: fixed !important;
   z-index: 10002 !important;
-  top: 45% !important;
+  top: 36% !important;
   left: 50% !important;
   transform: translate(-50%, -50%) !important;
-  width: min(900px, 94vw) !important;
+  width: min(960px, 94vw) !important;
   height: auto !important;
   aspect-ratio: 16/9 !important;
   border-radius: 12px;
@@ -2356,6 +2356,7 @@ html, body {
   width: 100%;
   height: auto;
   aspect-ratio: 16/9;
+  max-height: min(52vh, 420px);
 }
 
 .sp-video-container {
@@ -2402,11 +2403,27 @@ html, body {
     bottom: 80px;
   }
   .yt-video-container.in-full {
-    width: 100vw;
-    max-width: 100vw;
-    border-radius: 0;
-    bottom: 50%;
-    transform: translate(-50%, 50%);
+    width: 94vw !important;
+    max-width: 94vw !important;
+    top: 30% !important;
+    bottom: auto !important;
+    border-radius: 10px;
+    transform: translate(-50%, -50%) !important;
+  }
+
+  .sp-disc-wrap.is-video {
+    max-height: 40vh;
+  }
+}
+
+@media (orientation: landscape) {
+  .yt-video-container.in-full {
+    top: 44% !important;
+    width: min(78vw, 1200px) !important;
+  }
+
+  .sp-disc-wrap.is-video {
+    max-height: 58vh;
   }
 }
 
@@ -2488,34 +2505,17 @@ html, body {
     border-radius: 12px;
   }
 
-  /* Fixed Video in Full Player for Mobile */
-  .yt-video-container.in-full {
-    position: fixed !important;
-    z-index: 1001; /* Above sp-header but below close button */
-    top: 40% !important;
-    left: 50% !important;
-    transform: translate(-50%, -50%) !important;
-    width: 95vw !important;
-    height: auto !important;
-    aspect-ratio: 16/9;
-    border-radius: 8px;
-    box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+  .sp-controls {
+    margin-top: 6px;
   }
 }
 
 /* Desktop Video in Full Player */
 @media (min-width: 769px) {
   .yt-video-container.in-full {
-    position: fixed !important;
-    z-index: 1001;
-    top: 100px;
-    left: 50%;
-    width: min(800px, 90vw) !important;
-    height: auto !important;
-    aspect-ratio: 16/9;
-    transform: translateX(-50%) !important;
-    bottom: auto;
-    border-radius: 12px;
-    box-shadow: 0 20px 50px rgba(0,0,0,0.8);
+    top: 36% !important;
+    width: min(900px, 88vw) !important;
+    bottom: auto !important;
+    transform: translate(-50%, -50%) !important;
   }
 }
