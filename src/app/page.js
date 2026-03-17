@@ -450,6 +450,7 @@ export default function Home() {
   const nativeControlsEnabledRef = useRef(true);
   const lastNativeTrackKeyRef = useRef(null);
   const lastNativeActionRef = useRef({ action: '', at: 0 });
+  const nativeTrackLoadedRef = useRef(false);
   const nativeAndroid = isNativeAndroid();
 
   function apiPath(path) {
@@ -584,7 +585,13 @@ export default function Home() {
         const bg = await getBackgroundMode();
         if (bg) bg.enable();
 
-        if (nativeAndroid && currentSong && nativeShouldPlayRef.current && !nativeIsPlaying) {
+        if (
+          nativeAndroid &&
+          currentSong &&
+          nativeTrackLoadedRef.current &&
+          nativeShouldPlayRef.current &&
+          !nativeIsPlaying
+        ) {
           const now = Date.now();
           if (now - nativeLastResumeAtRef.current > 3000) {
             nativeLastResumeAtRef.current = now;
@@ -609,7 +616,7 @@ export default function Home() {
                    queue: [{ url: data.streamUrl, title: currentSong.title, artist: currentSong.artist, artwork: currentSong.image || '' }],
                    index: 0
                  });
-                 NativeMusicPlayer.seekTo({ position: time * 1000 });
+                 NativeMusicPlayer.seekTo({ positionMs: time * 1000 });
                  setNativeIsPlaying(true);
                }
              } catch(e) {}
@@ -740,11 +747,11 @@ export default function Home() {
           handleNext();
         } else if (action === 'previous') {
           handlePrev();
-        } else if (action === 'play') {
+        } else if (action === 'play' && nativeTrackLoadedRef.current) {
           setNativeIsPlaying(true);
           setOptimisticPlaying(true);
           nativeShouldPlayRef.current = true;
-        } else if (action === 'pause') {
+        } else if (action === 'pause' && nativeTrackLoadedRef.current) {
           setNativeIsPlaying(false);
           setOptimisticPlaying(false);
           nativeShouldPlayRef.current = false;
@@ -1378,6 +1385,7 @@ export default function Home() {
             queueIndexRef.current = Math.max(0, queueSource.findIndex(s => songKey(s) === key));
             setCurrentSong(songWithUrl);
             setNativeIsPlaying(true);
+            nativeTrackLoadedRef.current = true;
             nativeShouldPlayRef.current = true;
             isLoadingSongRef.current = false;
             setIsLoadingSong(false);
@@ -1391,6 +1399,7 @@ export default function Home() {
           const fallbackVideoId = videoId || await resolveSongVideoId(song);
           setCurrentSong({ ...song, videoId: fallbackVideoId || song.videoId || null });
           setNativeIsPlaying(false);
+          nativeTrackLoadedRef.current = false;
           nativeShouldPlayRef.current = false;
           setVideoEnabled(false);
           if (fallbackVideoId) {
@@ -1412,6 +1421,9 @@ export default function Home() {
 
         } catch (nativeErr) {
           console.error('Native playback error:', nativeErr);
+          nativeTrackLoadedRef.current = false;
+          nativeShouldPlayRef.current = false;
+          setNativeIsPlaying(false);
           isLoadingSongRef.current = false;
           setIsLoadingSong(false);
           setLoadingSongKey(null);
@@ -1427,6 +1439,8 @@ export default function Home() {
       const vId = playableSong.videoId || resolvedVideoId;
       setCurrentSong(playableSong);
       setNativeIsPlaying(false);
+      nativeTrackLoadedRef.current = false;
+      nativeShouldPlayRef.current = false;
       
       // Audio-first UX: only load iframe video when user explicitly chooses Video mode.
       if (vId) {
@@ -1766,7 +1780,7 @@ export default function Home() {
   }
 
   async function handlePlayPauseToggle() {
-    if (nativeAndroid && currentSong && !videoEnabled) {
+    if (nativeAndroid && currentSong && !videoEnabled && nativeTrackLoadedRef.current) {
       try {
         if (nativeIsPlaying) {
           await NativeMusicPlayer.pause();
