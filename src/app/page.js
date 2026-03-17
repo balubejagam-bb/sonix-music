@@ -452,7 +452,8 @@ export default function Home() {
   const lastNativeTrackKeyRef = useRef(null);
   const lastNativeActionRef = useRef({ action: '', at: 0 });
   const nativeTrackLoadedRef = useRef(false);
-  const nativeAndroid = isNativeAndroid();
+  // Use the same web playback engine on Android as desktop for consistent controls.
+  const nativeAndroid = false && isNativeAndroid();
 
   function apiPath(path) {
     return clientApiPath(path);
