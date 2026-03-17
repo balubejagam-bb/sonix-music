@@ -374,7 +374,17 @@ export default function Home() {
   const [visualizer, setVisualizer] = useState('waves'); // waves, bars, pulse
   const [nativeIsPlaying, setNativeIsPlaying] = useState(false);
   const [shuffleEnabled, setShuffleEnabled] = useState(false);
-  const [repeatMode, setRepeatMode] = useState('off');
+  const [repeatMode, setRepeatMode] = useState('off'); // off, all, one
+  const [activeHeroIndex, setActiveHeroIndex] = useState(0);
+
+  // Auto-rotate hero every 8 seconds
+  useEffect(() => {
+    if (view !== 'home' || search.trim()) return;
+    const interval = setInterval(() => {
+      setActiveHeroIndex(prev => (prev + 1) % Math.min(5, songs.length || 1));
+    }, 8000);
+    return () => clearInterval(interval);
+  }, [view, search, songs.length]);
   const [optimisticPlaying, setOptimisticPlaying] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [voiceTranscript, setVoiceTranscript] = useState('');
@@ -476,24 +486,30 @@ export default function Home() {
     
     // Determine which engine should be playing
     const vid = currentSong.videoId;
-    if (!vid) return;
+    const shouldBeVideo = !!vid;
 
-    if (videoEnabled) {
+    if (shouldBeVideo && !videoEnabled) {
       // Switched TO Video: If audio engine is playing, transfer to IFrame
       const a = yt.audioElement;
       if (a && a.src && a.src !== window.location.href && !a.paused) {
         const time = a.currentTime;
         a.pause();
         a.src = '';
+        setVideoEnabled(true);
         yt.playVideoById(vid);
         // YT load takes a bit, seek after it starts playing via onStateChange or just try now
         setTimeout(() => yt.seekTo(time), 500);
+      } else if (!videoEnabled) {
+        // If it should be video but isn't enabled, enable it and play
+        setVideoEnabled(true);
+        yt.playVideoById(vid);
       }
-    } else {
+    } else if (!shouldBeVideo && videoEnabled) {
       // Switched TO Audio: If IFrame is playing, transfer to Direct Stream
       if (yt.isPlaying && !yt.audioElement?.src) {
         const time = yt.currentTime;
         yt.pause();
+        setVideoEnabled(false);
         fetch(`/api/yt-stream?videoId=${encodeURIComponent(vid)}`)
           .then(r => r.json())
           .then(data => {
@@ -502,9 +518,12 @@ export default function Home() {
               setTimeout(() => yt.seekTo(time), 100);
             }
           });
+      } else if (videoEnabled) {
+        // If it should be audio but video is enabled, disable video
+        setVideoEnabled(false);
       }
     }
-  }, [videoEnabled]);
+  }, [currentSong, isLoadingSong, videoEnabled]); // Keep videoEnabled here to react to its changes for engine transfer
 
   // ───── Playback watchdog (keep background playing) ─────
   useEffect(() => {
@@ -1164,6 +1183,7 @@ export default function Home() {
             }
 
             yt.pause();
+            setVideoEnabled(false); // Native Android player is audio-only
             await NativeMusicPlayer.playQueue({
               queue: androidQueue,
               index: Math.max(0, queueSource.findIndex(s => songKey(s) === key)),
@@ -1205,34 +1225,16 @@ export default function Home() {
       const resolvedVideoId = await resolveSongVideoId(song);
       const playableSong = (resolvedVideoId && !song.videoId) ? { ...song, videoId: resolvedVideoId } : song;
 
+      const vId = playableSong.videoId || resolvedVideoId;
       setCurrentSong(playableSong);
       setNativeIsPlaying(false);
       
-      // If NOT in video mode, attempt to play direct audio stream to bypass YT background restrictions
-      if (!videoEnabled && (resolvedVideoId || song.videoId)) {
-        try {
-          const vid = resolvedVideoId || song.videoId;
-          const res = await fetch(`/api/yt-stream?videoId=${encodeURIComponent(vid)}`);
-          if (res.ok) {
-            const data = await res.json();
-            if (data.streamUrl) {
-              yt.playStream(data.streamUrl);
-              isLoadingSongRef.current = false;
-              setIsLoadingSong(false);
-              setLoadingSongKey(null);
-            } else {
-              yt.playVideoById(vid);
-            }
-          } else {
-            // Server error or 404 (stream not found) -> Fallback to Iframe
-            yt.playVideoById(vid);
-          }
-        } catch (e) {
-          yt.playVideoById(resolvedVideoId || song.videoId);
-        }
-      } else if (resolvedVideoId) {
-        yt.playVideoById(resolvedVideoId);
+      // Automatically enable video for YT content, disable for non-YT
+      if (vId) {
+        setVideoEnabled(true);
+        yt.playVideoById(vId);
       } else {
+        setVideoEnabled(false);
         yt.searchAndPlay(song.title || '', song.artist || '');
       }
 
@@ -1474,9 +1476,11 @@ export default function Home() {
           // Load and play the correct video
           yt.playVideoById(videoId);
         }
+        setVideoEnabled(true); // Ensure video is enabled for YT content
       } else {
         // DB song with no videoId cached — search YT
         yt.searchAndPlay(currentSong.title, currentSong.artist, currentSong.type || 'song');
+        setVideoEnabled(false); // Ensure video is disabled for non-YT content
       }
     }
   }
@@ -1733,22 +1737,44 @@ export default function Home() {
         <div className="content-scroll">
           {view === 'home' && !search.trim() && (
             <div className="fade-in">
-              <div className="premium-hero">
+              {/* Premium Hero Carousel */}
+              <div className="premium-hero" style={{ cursor: 'pointer' }} onClick={(e) => {
+                if (e.target.closest('.hero-indicator')) return;
+                songs[activeHeroIndex] && playSongDirect(songs[activeHeroIndex], songs);
+              }}>
                 <img 
-                  src={(songs[0]?.image || songs[0]?.thumbnail || 'https://picsum.photos/seed/trending/800/400').replace('mqdefault', 'hqdefault')} 
+                  src={(songs[activeHeroIndex]?.image || songs[activeHeroIndex]?.thumbnail || 'https://picsum.photos/seed/trending/800/400').replace('mqdefault', 'hqdefault')} 
                   className="hero-bg-img" 
                   alt="" 
                 />
                 <div className="hero-overlay"></div>
                 <div className="hero-content">
                   <span className="hero-tag">TRENDING NOW</span>
-                  <h1 className="hero-title">{decodeHtml(songs[0]?.title) || 'Sonix Music Premium'}</h1>
+                  <h1 className="hero-title">{decodeHtml(songs[activeHeroIndex]?.title) || 'Sonix Music Premium'}</h1>
                   <p style={{ color: 'rgba(255,255,255,0.7)', marginBottom: 24, fontSize: 18, fontWeight: 500 }}>
-                    Experience {decodeHtml(songs[0]?.artist) || 'the latest chart-toppers'} and more trending hits in high-fidelity.
+                    Listen to {decodeHtml(songs[activeHeroIndex]?.artist) || 'the world\'s best artists'} now on Sonix Music HD.
                   </p>
-                  <button className="hero-btn" onClick={() => songs[0] && playSongDirect(songs[0], songs)}>
-                    Listen Now
-                  </button>
+                  <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                    <button className="hero-btn">Play Now</button>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginLeft: 'auto' }}>
+                      {[0, 1, 2, 3, 4].map(idx => (
+                        <div 
+                          key={idx} 
+                          className="hero-indicator"
+                          onClick={(e) => { e.stopPropagation(); setActiveHeroIndex(idx); }}
+                          style={{ 
+                            width: idx === activeHeroIndex ? 30 : 10, 
+                            height: 10, 
+                            borderRadius: 5, 
+                            background: idx === activeHeroIndex ? 'var(--accent-primary)' : 'rgba(255,255,255,0.2)',
+                            cursor: 'pointer',
+                            transition: 'all 0.4s cubic-bezier(0.4, 0, 0.2, 1)',
+                            boxShadow: idx === activeHeroIndex ? '0 0 15px var(--accent-primary)' : 'none'
+                          }} 
+                        />
+                      ))}
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -2074,20 +2100,7 @@ export default function Home() {
             </div>
 
             <div className="player-extra">
-              <div className="mode-toggle">
-                <button 
-                  className={`mode-btn ${!videoEnabled ? 'active' : ''}`} 
-                  onClick={(e) => { e.stopPropagation(); setVideoEnabled(false); }}
-                >
-                  AUDIO
-                </button>
-                <button 
-                  className={`mode-btn ${videoEnabled ? 'active' : ''}`} 
-                  onClick={(e) => { e.stopPropagation(); setVideoEnabled(true); }}
-                >
-                  VIDEO
-                </button>
-              </div>
+              {/* Mode Switch removed as requested - Always shows video/large artwork */}
               <div className="volume-control">
                 <button onClick={(e) => { e.stopPropagation(); handleVolume(volume > 0 ? 0 : 80); }}>
                   {volume === 0 ? '🔇' : volume < 50 ? '🔉' : '🔊'}
