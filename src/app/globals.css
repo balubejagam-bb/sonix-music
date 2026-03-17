@@ -1181,9 +1181,10 @@ html, body {
   .full-player-left, .full-player-right { flex: 1; max-width: 500px; width: 100%; }
 }
 @media (max-width: 767px) {
-  .full-player-grid { padding: 80px 24px 40px 24px; }
+  .full-player-grid { padding: 70px 20px 24px 20px; gap: 20px; }
   .close-full-player { top: 16px; left: 16px; width: 36px; height: 36px; padding: 0; }
   .full-player-right { width: 100%; }
+  .artwork-container { max-width: 200px; }
 }
 
 .artwork-container {
@@ -1255,20 +1256,35 @@ html, body {
 }
 @keyframes slow-spin { to { transform: rotate(360deg); } }
 
-.song-meta { text-align: center; margin-bottom: 30px; }
-@media (min-width: 768px) { .song-meta { text-align: left; } }
+.song-meta { text-align: center; margin-bottom: 20px; }
+@media (min-width: 768px) { .song-meta { text-align: left; margin-bottom: 30px; } }
 .song-meta .title { 
-  font-size: 32px; font-weight: 800; margin-bottom: 12px; 
+  font-size: 26px; font-weight: 800; margin-bottom: 8px; 
   text-shadow: 0 0 20px rgba(124, 58, 237, 0.4);
   background: linear-gradient(135deg, #fff 0%, #a78bfa 100%);
   -webkit-background-clip: text; 
   background-clip: text;
   -webkit-text-fill-color: transparent;
+  /* Clamp to 2 lines max — no more wall of text */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  line-height: 1.3;
+}
+@media (min-width: 768px) {
+  .song-meta .title { font-size: 32px; -webkit-line-clamp: 3; }
 }
 .song-meta .artist { 
-  font-size: 20px; color: rgba(255,255,255,0.6); 
+  font-size: 16px; color: rgba(255,255,255,0.6); 
   font-weight: 500;
   letter-spacing: 0.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (min-width: 768px) {
+  .song-meta .artist { font-size: 20px; }
 }
 
 /* Custom Audio Beats Panel */
