@@ -385,6 +385,8 @@ export default function Home() {
   const [activeHeroIndex, setActiveHeroIndex] = useState(0);
   const [homeSectionsReady, setHomeSectionsReady] = useState(false);
   const browseAllRef = useRef(null);
+  const contentScrollRef = useRef(null);
+  const songsRetryTimerRef = useRef(null);
 
   // Auto-rotate hero every 8 seconds
   useEffect(() => {
@@ -837,8 +839,9 @@ export default function Home() {
     } catch (e) { console.error('Failed to load playlists', e); }
   }
 
-  async function loadSongs(p, options = {}) {
-    setLoading(true);
+  async function loadSongs(p, options = {}, attempt = 0) {
+    const shouldShowSpinner = p === 1 && songs.length === 0;
+    if (shouldShowSpinner) setLoading(true);
     try {
       const pageSize = nativeAndroid ? 25 : 50;
       const params = new URLSearchParams({
@@ -847,16 +850,30 @@ export default function Home() {
         ...(options.genre && { genre: options.genre }),
         ...(options.source && options.source !== 'all' && { source: options.source }),
       });
-      const res = await fetch(apiPath(`/api/songs?${params}`));
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), nativeAndroid ? 12000 : 9000);
+      const res = await fetch(apiPath(`/api/songs?${params}`), { signal: controller.signal });
+      clearTimeout(timeout);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (p === 1) { setSongs(data.songs || []); }
       else { setSongs(prev => [...prev, ...(data.songs || [])]); }
       setTotalSongs(data.total || 0);
       setPage(p);
+      if (songsRetryTimerRef.current) {
+        clearTimeout(songsRetryTimerRef.current);
+        songsRetryTimerRef.current = null;
+      }
     } catch (e) { 
       console.error('Failed to load songs:', e);
-      if (p === 1) setSongs([]); // Clear if initial load fails
+      if (nativeAndroid && p === 1 && attempt < 2) {
+        const delay = 1000 * (attempt + 1);
+        songsRetryTimerRef.current = setTimeout(() => {
+          loadSongs(1, options, attempt + 1);
+        }, delay);
+      } else if (p === 1 && songs.length === 0) {
+        setSongs([]); // Clear only when nothing local is available
+      }
     }
     setLoading(false);
   }
@@ -1832,10 +1849,29 @@ export default function Home() {
     } else if (!songs.length) {
       await loadSongs(1, { genre, source });
     }
-    setTimeout(() => {
-      browseAllRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }, 120);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const scroller = contentScrollRef.current;
+        const target = browseAllRef.current;
+        if (scroller && target) {
+          const top = Math.max(0, target.offsetTop - 8);
+          scroller.scrollTo({ top, behavior: 'smooth' });
+        } else {
+          target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      });
+    });
   }
+
+  useEffect(() => {
+    if (!nativeAndroid || view !== 'home') return;
+    const timer = setInterval(() => {
+      if (!loading && songs.length < 5) {
+        loadSongs(1, { genre, source });
+      }
+    }, 12000);
+    return () => clearInterval(timer);
+  }, [nativeAndroid, view, loading, songs.length, genre, source]);
 
   const displaySongs = search.trim() ? searchResults : songs;
   // For liked view: match from cachedSongs first, then fill in any YT/unknown songs from likedSongObjects
@@ -1998,7 +2034,7 @@ export default function Home() {
           </div>
         </div>
 
-        <div className="content-scroll">
+        <div className="content-scroll" ref={contentScrollRef}>
           {view === 'home' && !search.trim() && (
             <div className="fade-in">
               {/* Premium Hero Carousel */}

@@ -7,6 +7,12 @@ if (!globalThis.__SONIX_SONGS_API_CACHE) {
   globalThis.__SONIX_SONGS_API_CACHE = songsApiCache;
 }
 
+const COUNT_CACHE_TTL_MS = 2 * 60 * 1000;
+const songsCountCache = globalThis.__SONIX_SONGS_COUNT_CACHE || new Map();
+if (!globalThis.__SONIX_SONGS_COUNT_CACHE) {
+  globalThis.__SONIX_SONGS_COUNT_CACHE = songsCountCache;
+}
+
 export async function GET(request) {
   try {
     const { searchParams } = new URL(request.url);
@@ -46,6 +52,7 @@ export async function GET(request) {
 
     const sortObj = sort === 'year' ? { year: -1 } : sort === 'title' ? { title: 1 } : { popularity: -1 };
     const collections = source === 'spotify' ? ['spotify_tracks'] : source === 'jiosaavn' ? ['songs'] : ['songs', 'spotify_tracks'];
+    const isDefaultQuery = !search && !genre && !year && !language;
     const projection = {
       title: 1,
       artist: 1,
@@ -67,8 +74,25 @@ export async function GET(request) {
     const collectionResults = await Promise.all(
       collections.map(async (col) => {
         const collection = db.collection(col);
+        const countCacheKey = `${col}:default`;
+        let countPromise;
+
+        if (isDefaultQuery) {
+          const cachedCount = songsCountCache.get(countCacheKey);
+          if (cachedCount && now - cachedCount.ts < COUNT_CACHE_TTL_MS) {
+            countPromise = Promise.resolve(cachedCount.value);
+          } else {
+            countPromise = collection.estimatedDocumentCount().then((value) => {
+              songsCountCache.set(countCacheKey, { ts: Date.now(), value });
+              return value;
+            });
+          }
+        } else {
+          countPromise = collection.countDocuments(query);
+        }
+
         const [count, docs] = await Promise.all([
-          collection.countDocuments(query),
+          countPromise,
           all
             ? collection.find(query, { projection }).sort(sortObj).toArray()
             : collection.find(query, { projection }).sort(sortObj).skip(skip).limit(limit).toArray(),
