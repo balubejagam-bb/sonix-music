@@ -523,6 +523,10 @@ export default function Home() {
         console.log('[Sonix] App backgrounded. Ensuring playback stability.');
         const bg = await getBackgroundMode();
         if (bg) bg.enable();
+
+        if (nativeAndroid && currentSong && !nativeIsPlaying) {
+          NativeMusicPlayer.resume().catch(() => {});
+        }
         
         // If we are playing a video in the foreground, it will likely pause.
         // Transfer to native background audio if possible.
@@ -650,8 +654,14 @@ export default function Home() {
       const actionListener = NativeMusicPlayer.addListener('onWebAction', (res) => {
         if (res.action === 'next') handleNext();
         else if (res.action === 'previous') handlePrev();
-        else if (res.action === 'play') { yt.play(); setNativeIsPlaying(true); }
-        else if (res.action === 'pause') { yt.pause(); setNativeIsPlaying(false); }
+        else if (res.action === 'play') {
+          NativeMusicPlayer.resume().catch(() => {});
+          setNativeIsPlaying(true);
+        }
+        else if (res.action === 'pause') {
+          NativeMusicPlayer.pause().catch(() => {});
+          setNativeIsPlaying(false);
+        }
       });
 
       // Fallback polling (less frequent)
@@ -1718,6 +1728,8 @@ export default function Home() {
 
   // Gestures for full player
   const touchStartX = useRef(0);
+  const seekDragActiveRef = useRef(false);
+  const seekDragTargetRef = useRef(null);
   const handleTouchStart = (e) => { touchStartX.current = e.touches[0].clientX; };
   const handleTouchEnd = (e) => {
     const diff = e.changedTouches[0].clientX - touchStartX.current;
@@ -1726,6 +1738,51 @@ export default function Home() {
       else handleNext();
     }
   };
+
+  function updateSeekFromClientX(clientX, targetEl) {
+    if (!targetEl || !currentSong) return;
+    const rect = targetEl.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const t = pct * (yt.duration || 0);
+    handleSeek(t);
+  }
+
+  function startSeekDrag(e) {
+    const target = e.currentTarget;
+    seekDragActiveRef.current = true;
+    seekDragTargetRef.current = target;
+    updateSeekFromClientX(getEventX(e), target);
+    e.preventDefault();
+  }
+
+  useEffect(() => {
+    const move = (e) => {
+      if (!seekDragActiveRef.current) return;
+      const point = e.touches?.[0]?.clientX ?? e.clientX;
+      if (typeof point === 'number') {
+        updateSeekFromClientX(point, seekDragTargetRef.current);
+      }
+    };
+
+    const end = () => {
+      seekDragActiveRef.current = false;
+      seekDragTargetRef.current = null;
+    };
+
+    window.addEventListener('mousemove', move, { passive: false });
+    window.addEventListener('touchmove', move, { passive: false });
+    window.addEventListener('mouseup', end);
+    window.addEventListener('touchend', end);
+    window.addEventListener('touchcancel', end);
+
+    return () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('touchmove', move);
+      window.removeEventListener('mouseup', end);
+      window.removeEventListener('touchend', end);
+      window.removeEventListener('touchcancel', end);
+    };
+  }, [currentSong, yt.duration]);
 
   function loadMore() { 
     if (view === 'podcasts') loadPodcasts(page + 1, { search });
@@ -2251,7 +2308,12 @@ export default function Home() {
               </div>
               <div className="player-progress">
                 <span className="time">{fmt(yt.currentTime)}</span>
-                <div className="progress-track" onClick={(e) => { e.stopPropagation(); seekFromBarEvent(e); }}>
+                <div
+                  className="progress-track"
+                  onClick={(e) => { e.stopPropagation(); seekFromBarEvent(e); }}
+                  onMouseDown={(e) => { e.stopPropagation(); startSeekDrag(e); }}
+                  onTouchStart={(e) => { e.stopPropagation(); startSeekDrag(e); }}
+                >
                   <div className="progress-filled" style={{ width: yt.duration ? `${(yt.currentTime / yt.duration) * 100}%` : '0%' }}></div>
                 </div>
                 <span className="time">{fmt(yt.duration)}</span>
@@ -2358,6 +2420,8 @@ export default function Home() {
               <div
                 className="sp-progress-track"
                 onClick={seekFromBarEvent}
+                onMouseDown={startSeekDrag}
+                onTouchStart={startSeekDrag}
                 onTouchEnd={(e) => { e.preventDefault(); seekFromBarEvent(e); }}
               >
                 <div className="sp-progress-fill" style={{ width: yt.duration ? `${(yt.currentTime / yt.duration) * 100}%` : '0%' }} />
