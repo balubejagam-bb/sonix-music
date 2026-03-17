@@ -457,6 +457,18 @@ export default function Home() {
     return clientApiPath(path);
   }
 
+  async function fetchJsonWithTimeout(url, timeoutMs = 10000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   function canPlayNatively(song) {
     return nativeAndroid && typeof song?.url === 'string' && /^https?:\/\//i.test(song.url);
   }
@@ -1291,11 +1303,11 @@ export default function Home() {
 
           // Path 1: resolve page URLs/non-direct links only when needed
           if (!streamUrl && song.url && /^https?:\/\//i.test(song.url)) {
-            const res = await fetch(
-              apiPath(`/api/stream?url=${encodeURIComponent(song.url)}&title=${encodeURIComponent(song.title || '')}&artist=${encodeURIComponent(song.artist || '')}`)
+            const data = await fetchJsonWithTimeout(
+              apiPath(`/api/stream?url=${encodeURIComponent(song.url)}&title=${encodeURIComponent(song.title || '')}&artist=${encodeURIComponent(song.artist || '')}`),
+              12000
             );
             if (isStale()) return;
-            const data = await res.json();
             if (data.streamUrl) streamUrl = data.streamUrl;
           }
 
@@ -1306,9 +1318,8 @@ export default function Home() {
               const suffix = song.type === 'podcast' || song.source === 'podcast' ? '' : ' official audio';
               const query = `${song.title || ''} ${song.artist || ''}${suffix}`.trim();
               try {
-                const res = await fetch(apiPath(`/api/youtube-search?q=${encodeURIComponent(query)}`));
+                const data = await fetchJsonWithTimeout(apiPath(`/api/youtube-search?q=${encodeURIComponent(query)}`), 12000);
                 if (isStale()) return;
-                const data = await res.json();
                 if (data.videoId) videoId = data.videoId;
               } catch {}
             }
@@ -1316,9 +1327,8 @@ export default function Home() {
             // Now resolve stream URL from videoId via dedicated route
             if (videoId) {
               try {
-                const res = await fetch(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(videoId)}`));
+                const data = await fetchJsonWithTimeout(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(videoId)}`), 15000);
                 if (isStale()) return;
-                const data = await res.json();
                 if (data.streamUrl) streamUrl = data.streamUrl;
               } catch {}
             }
@@ -1326,9 +1336,11 @@ export default function Home() {
             // Last resort: old stream=true path
             if (!streamUrl && videoId) {
               try {
-                const res = await fetch(apiPath(`/api/youtube-search?q=${encodeURIComponent((song.title || '') + ' ' + (song.artist || ''))}&stream=true`));
+                const data = await fetchJsonWithTimeout(
+                  apiPath(`/api/youtube-search?q=${encodeURIComponent((song.title || '') + ' ' + (song.artist || ''))}&stream=true`),
+                  12000
+                );
                 if (isStale()) return;
-                const data = await res.json();
                 if (data.videoId) videoId = data.videoId;
                 if (data.streamUrl) streamUrl = data.streamUrl;
               } catch {}
@@ -1671,18 +1683,20 @@ export default function Home() {
 
     if (song.url && /^https?:\/\//i.test(song.url)) {
       try {
-        const res = await fetch(
-          apiPath(`/api/stream?url=${encodeURIComponent(song.url)}&title=${encodeURIComponent(song.title || '')}&artist=${encodeURIComponent(song.artist || '')}`)
+        const data = await fetchJsonWithTimeout(
+          apiPath(`/api/stream?url=${encodeURIComponent(song.url)}&title=${encodeURIComponent(song.title || '')}&artist=${encodeURIComponent(song.artist || '')}`),
+          nativeAndroid ? 14000 : 10000
         );
-        const data = await res.json();
         if (data?.streamUrl) return data.streamUrl;
       } catch {}
     }
 
     if (videoId) {
       try {
-        const res = await fetch(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(videoId)}`));
-        const data = await res.json();
+        const data = await fetchJsonWithTimeout(
+          apiPath(`/api/yt-stream?videoId=${encodeURIComponent(videoId)}`),
+          nativeAndroid ? 15000 : 10000
+        );
         if (data?.streamUrl) return data.streamUrl;
       } catch {}
     }
@@ -1690,8 +1704,10 @@ export default function Home() {
     try {
       const q = `${song.title || ''} ${song.artist || ''}`.trim();
       if (q) {
-        const res = await fetch(apiPath(`/api/youtube-search?q=${encodeURIComponent(q)}&stream=true`));
-        const data = await res.json();
+        const data = await fetchJsonWithTimeout(
+          apiPath(`/api/youtube-search?q=${encodeURIComponent(q)}&stream=true`),
+          nativeAndroid ? 12000 : 9000
+        );
         if (data?.streamUrl) return data.streamUrl;
       }
     } catch {}
