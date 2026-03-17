@@ -3,7 +3,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { LocalNotifications } from '@capacitor/local-notifications';
-import { BackgroundMode as NativeBackgroundMode } from '@anuradev/capacitor-background-mode';
 import { useAuth } from '@/lib/authContext';
 import AuthModal from '@/components/AuthModal';
 import AddToPlaylistMenu from '@/components/AddToPlaylistMenu';
@@ -20,10 +19,29 @@ function clientApiPath(path) {
   return isNativeAndroid() ? `https://sonix-music.vercel.app${path}` : path;
 }
 
-function getBackgroundMode() {
+let backgroundModeLoaderPromise = null;
+async function getBackgroundMode() {
   if (typeof window === 'undefined') return null;
   if (!isNativeAndroid()) return null;
-  return NativeBackgroundMode || null;
+
+  if (!backgroundModeLoaderPromise) {
+    backgroundModeLoaderPromise = import('@anuradev/capacitor-background-mode')
+      .then((m) => {
+        const bg = m?.BackgroundMode;
+        if (!bg) return null;
+
+        // Wrap plugin methods in plain functions so this object is never treated
+        // as a thenable by await/promise resolution.
+        return {
+          enable: (...args) => bg.enable?.(...args),
+          disableWebViewOptimizations: (...args) => bg.disableWebViewOptimizations?.(...args),
+          setDefaults: (...args) => bg.setDefaults?.(...args),
+        };
+      })
+      .catch(() => null);
+  }
+
+  return backgroundModeLoaderPromise;
 }
 
 function getMusicControls() {
@@ -385,12 +403,14 @@ export default function Home() {
   const browseAllRef = useRef(null);
   const contentScrollRef = useRef(null);
   const songsRetryTimerRef = useRef(null);
+  const startupSafetyTimerRef = useRef(null);
+  const heroTouchStartXRef = useRef(0);
 
   // Auto-rotate hero every 8 seconds
   useEffect(() => {
     if (view !== 'home' || search.trim()) return;
     const interval = setInterval(() => {
-      setActiveHeroIndex(prev => (prev + 1) % Math.min(5, songs.length || 1));
+      setActiveHeroIndex(prev => (prev + 1) % Math.min(4, songs.length || 1));
     }, 8000);
     return () => clearInterval(interval);
   }, [view, search, songs.length]);
@@ -483,34 +503,6 @@ export default function Home() {
   // ───── Load initial data & cache (Once) ─────
   useEffect(() => {
     const initApp = async () => {
-      // Wake Lock
-      if ('wakeLock' in navigator) {
-        try { await navigator.wakeLock.request('screen'); } catch {}
-      }
-
-      if (nativeAndroid) {
-        try {
-          await LocalNotifications.requestPermissions();
-          const bg = getBackgroundMode();
-          if (bg) {
-            await bg.enable();
-            if (typeof bg.disableWebViewOptimizations === 'function') {
-              await bg.disableWebViewOptimizations();
-            }
-            if (typeof bg.setDefaults === 'function') {
-              await bg.setDefaults({
-                title: 'Sonix Music',
-                text: 'Running in background',
-                icon: 'icon',
-                color: '7c3aed',
-                resume: true,
-                hidden: false
-              });
-            }
-          }
-        } catch(e) { console.error('Background init failed:', e); }
-      }
-
       // Hydrate quickly from local cache for lag-free first paint on mobile.
       try {
         const cachedRaw = localStorage.getItem('sonix_cache');
@@ -525,10 +517,46 @@ export default function Home() {
         }
       } catch {}
 
+      // Never let startup spinner block the UI for too long on slow mobile networks.
+      startupSafetyTimerRef.current = setTimeout(() => {
+        setLoading(false);
+      }, nativeAndroid ? 4500 : 3500);
+
+      // Wake lock is optional; request without blocking the first paint.
+      if ('wakeLock' in navigator) {
+        navigator.wakeLock?.request?.('screen').catch(() => {});
+      }
+
+      // Initialize native plugins in background so home content can render first.
+      if (nativeAndroid) {
+        setTimeout(async () => {
+          try {
+            await LocalNotifications.requestPermissions();
+            const bg = await getBackgroundMode();
+            if (bg) {
+              await bg.enable();
+              if (typeof bg.disableWebViewOptimizations === 'function') {
+                await bg.disableWebViewOptimizations();
+              }
+              if (typeof bg.setDefaults === 'function') {
+                await bg.setDefaults({
+                  title: 'Sonix Music',
+                  text: 'Running in background',
+                  icon: 'icon',
+                  color: '7c3aed',
+                  resume: true,
+                  hidden: false
+                });
+              }
+            }
+          } catch(e) { console.error('Background init failed:', e); }
+        }, 600);
+      }
+
       loadPlaylists();
       loadSongs(1);
       if (nativeAndroid) {
-        setTimeout(() => { backgroundCache(); }, 3500);
+        setTimeout(() => { backgroundCache(); }, 7000);
       } else {
         backgroundCache();
       }
@@ -540,6 +568,12 @@ export default function Home() {
     };
 
     initApp();
+    return () => {
+      if (startupSafetyTimerRef.current) {
+        clearTimeout(startupSafetyTimerRef.current);
+        startupSafetyTimerRef.current = null;
+      }
+    };
   }, []);
 
   // ───── Playback watchdog (keep background playing) ─────
@@ -547,7 +581,7 @@ export default function Home() {
     const handleVisibility = async () => {
       if (document.hidden) {
         console.log('[Sonix] App backgrounded. Ensuring playback stability.');
-        const bg = getBackgroundMode();
+        const bg = await getBackgroundMode();
         if (bg) bg.enable();
 
         if (nativeAndroid && currentSong && nativeShouldPlayRef.current && !nativeIsPlaying) {
@@ -873,10 +907,12 @@ export default function Home() {
   }
 
   async function loadSongs(p, options = {}, attempt = 0) {
-    const shouldShowSpinner = p === 1 && songs.length === 0;
+    const hasAnyLocal = songs.length > 0 || cachedSongs.length > 0;
+    const shouldShowSpinner = p === 1 && !hasAnyLocal && attempt === 0;
     if (shouldShowSpinner) setLoading(true);
     try {
       const pageSize = nativeAndroid ? 25 : 50;
+      const requestTimeoutMs = nativeAndroid ? 20000 : 12000;
       const params = new URLSearchParams({
         page: p, limit: pageSize,
         ...(options.search && { search: options.search }),
@@ -884,7 +920,7 @@ export default function Home() {
         ...(options.source && options.source !== 'all' && { source: options.source }),
       });
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), nativeAndroid ? 12000 : 9000);
+      const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
       const res = await fetch(apiPath(`/api/songs?${params}`), { signal: controller.signal });
       clearTimeout(timeout);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -897,10 +933,19 @@ export default function Home() {
         clearTimeout(songsRetryTimerRef.current);
         songsRetryTimerRef.current = null;
       }
+      if (startupSafetyTimerRef.current) {
+        clearTimeout(startupSafetyTimerRef.current);
+        startupSafetyTimerRef.current = null;
+      }
     } catch (e) { 
-      console.error('Failed to load songs:', e);
-      if (nativeAndroid && p === 1 && attempt < 2) {
-        const delay = 1000 * (attempt + 1);
+      if (e?.name === 'AbortError') {
+        console.warn('Songs request timed out, retrying...', { attempt, nativeAndroid });
+      } else {
+        console.error('Failed to load songs:', e);
+      }
+
+      if (nativeAndroid && p === 1 && attempt < 3) {
+        const delay = 1000 + (attempt * 700);
         songsRetryTimerRef.current = setTimeout(() => {
           loadSongs(1, options, attempt + 1);
         }, delay);
@@ -1002,7 +1047,11 @@ export default function Home() {
 
   async function backgroundCache() {
     try {
-      const res = await fetch(apiPath('/api/songs?all=true'));
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), nativeAndroid ? 9000 : 7000);
+      const cacheLimit = nativeAndroid ? 500 : 1200;
+      const res = await fetch(apiPath(`/api/songs?page=1&limit=${cacheLimit}`), { signal: controller.signal });
+      clearTimeout(timeout);
       const data = await res.json();
       const allSongs = data.songs || [];
       setCachedSongs(allSongs);
@@ -1966,8 +2015,31 @@ export default function Home() {
         ? userPlaylistSongs
         : displaySongs;
 
+  const showLoginNudge = !authLoading && !user && !showAuthModal;
+  const heroSongs = songs.slice(0, 4);
+  const heroCount = Math.max(1, heroSongs.length);
+  const normalizedHeroIndex = activeHeroIndex % heroCount;
+  const activeHeroSong = heroSongs[normalizedHeroIndex] || songs[0];
+
+  const handleHeroTouchStart = (e) => {
+    heroTouchStartXRef.current = e.touches?.[0]?.clientX || 0;
+  };
+
+  const handleHeroTouchEnd = (e) => {
+    if (heroCount <= 1) return;
+    const endX = e.changedTouches?.[0]?.clientX || 0;
+    const delta = endX - heroTouchStartXRef.current;
+    if (Math.abs(delta) < 40) return;
+
+    if (delta < 0) {
+      setActiveHeroIndex(prev => (prev + 1) % heroCount);
+    } else {
+      setActiveHeroIndex(prev => (prev - 1 + heroCount) % heroCount);
+    }
+  };
+
   return (
-    <div className="app-layout">
+    <div className={`app-layout ${showLoginNudge ? 'has-login-banner' : ''}`}>
       {/* Mobile Menu Toggle */}
       <button
         className={`mobile-menu-btn ${mobileMenuOpen ? 'hidden' : ''}`}
@@ -2108,44 +2180,61 @@ export default function Home() {
           {view === 'home' && !search.trim() && (
             <div className="fade-in">
               {/* Premium Hero Carousel */}
-              <div className="premium-hero" style={{ cursor: 'pointer' }} onClick={(e) => {
+              <div
+                className="premium-hero"
+                style={{ cursor: 'pointer' }}
+                onTouchStart={handleHeroTouchStart}
+                onTouchEnd={handleHeroTouchEnd}
+                onClick={(e) => {
                 if (e.target.closest('.hero-indicator')) return;
-                songs[activeHeroIndex] && playSongDirect(songs[activeHeroIndex], songs);
+                activeHeroSong && playSongDirect(activeHeroSong, songs);
               }}>
                 <img 
-                  src={(songs[activeHeroIndex]?.image || songs[activeHeroIndex]?.thumbnail || 'https://picsum.photos/seed/trending/800/400').replace('mqdefault', 'hqdefault')} 
+                  src={(activeHeroSong?.image || activeHeroSong?.thumbnail || 'https://picsum.photos/seed/trending/800/400').replace('mqdefault', 'hqdefault')} 
                   className="hero-bg-img" 
                   alt="" 
                 />
                 <div className="hero-overlay"></div>
                 <div className="hero-content">
                   <span className="hero-tag">TRENDING NOW</span>
-                  <h1 className="hero-title">{decodeHtml(songs[activeHeroIndex]?.title) || 'Sonix Music Premium'}</h1>
+                  <h1 className="hero-title">{decodeHtml(activeHeroSong?.title) || 'Sonix Music Premium'}</h1>
                   <p style={{ color: 'rgba(255,255,255,0.7)', marginBottom: 24, fontSize: 18, fontWeight: 500 }}>
-                    Listen to {decodeHtml(songs[activeHeroIndex]?.artist) || 'the world\'s best artists'} now on Sonix Music HD.
+                    Listen to {decodeHtml(activeHeroSong?.artist) || 'the world\'s best artists'} now on Sonix Music HD.
                   </p>
                   <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
                     <button className="hero-btn">Play Now</button>
                     <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginLeft: 'auto' }}>
-                      {[0, 1, 2, 3, 4].map(idx => (
+                      {heroSongs.map((_, idx) => (
                         <div 
                           key={idx} 
                           className="hero-indicator"
                           onClick={(e) => { e.stopPropagation(); setActiveHeroIndex(idx); }}
                           style={{ 
-                            width: idx === activeHeroIndex ? 30 : 10, 
+                            width: idx === normalizedHeroIndex ? 30 : 10, 
                             height: 10, 
                             borderRadius: 5, 
-                            background: idx === activeHeroIndex ? 'var(--accent-primary)' : 'rgba(255,255,255,0.2)',
+                            background: idx === normalizedHeroIndex ? 'var(--accent-primary)' : 'rgba(255,255,255,0.2)',
                             cursor: 'pointer',
                             transition: 'all 0.4s cubic-bezier(0.4, 0, 0.2, 1)',
-                            boxShadow: idx === activeHeroIndex ? '0 0 15px var(--accent-primary)' : 'none'
+                            boxShadow: idx === normalizedHeroIndex ? '0 0 15px var(--accent-primary)' : 'none'
                           }} 
                         />
                       ))}
                     </div>
                   </div>
                 </div>
+              </div>
+
+              <div className="hero-scroll-nav" aria-label="Trending banners">
+                {heroSongs.map((s, idx) => (
+                  <button
+                    key={`${songKey(s)}-${idx}`}
+                    className={`hero-scroll-chip ${idx === normalizedHeroIndex ? 'active' : ''}`}
+                    onClick={() => setActiveHeroIndex(idx)}
+                  >
+                    {decodeHtml(s?.title) || `Banner ${idx + 1}`}
+                  </button>
+                ))}
               </div>
 
               {/* Trending Row */}
@@ -2650,19 +2739,14 @@ export default function Home() {
       )}
 
       {/* Login nudge banner — only when not logged in, hidden when modal is open */}
-      {!authLoading && !user && !showAuthModal && (
-        <div style={{
-          position: 'fixed', top: 0, left: 0, right: 0, zIndex: 500,
-          background: 'linear-gradient(90deg, #7c3aed, #1db954)',
-          padding: '9px 20px', display: 'flex', alignItems: 'center',
-          justifyContent: 'space-between', gap: 12,
-        }}>
-          <span style={{ color: '#fff', fontSize: 13, fontWeight: 500 }}>
+      {showLoginNudge && (
+        <div className="login-nudge-banner">
+          <span className="login-nudge-text">
             🎵 Log in to like songs, create playlists &amp; sync across devices
           </span>
           <button
             onClick={openAuthModal}
-            style={{ background: '#fff', color: '#7c3aed', border: 'none', borderRadius: 20, padding: '5px 16px', fontWeight: 700, fontSize: 13, cursor: 'pointer', flexShrink: 0 }}
+            className="login-nudge-btn"
           >
             Log In
           </button>

@@ -271,6 +271,75 @@ html, body {
   transform: translateY(0);
 }
 
+.hero-scroll-nav {
+  display: flex;
+  gap: 10px;
+  margin: -12px 0 18px;
+  overflow-x: auto;
+  padding: 4px 2px 8px;
+  scrollbar-width: thin;
+}
+
+.hero-scroll-chip {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.88);
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.hero-scroll-chip.active {
+  background: rgba(124, 58, 237, 0.28);
+  border-color: rgba(124, 58, 237, 0.8);
+  color: #fff;
+}
+
+.login-nudge-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 500;
+  background: linear-gradient(90deg, #7c3aed, #1db954);
+  padding: calc(9px + env(safe-area-inset-top, 0px)) 20px 9px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.login-nudge-text {
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.login-nudge-btn {
+  background: #fff;
+  color: #7c3aed;
+  border: none;
+  border-radius: 20px;
+  padding: 5px 16px;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* Keep search UI below the fixed login banner when visible */
+.app-layout.has-login-banner .search-container {
+  margin-top: 66px;
+}
+
+.app-layout.has-login-banner .mobile-menu-btn {
+  top: calc(12px + 66px);
+}
+
 /* Horizontal Carousels */
 .horizontal-scroll {
   display: flex;
@@ -970,7 +1039,7 @@ html, body {
   position: fixed;
   top: 12px;
   left: 12px;
-  z-index: 200;
+  z-index: 650;
   width: 40px;
   height: 40px;
   border-radius: var(--radius-sm);
@@ -1019,7 +1088,7 @@ html, body {
     left: -300px;
     top: 0;
     bottom: 0;
-    z-index: 150;
+    z-index: 620;
     width: 280px;
     min-width: 280px;
     height: 100vh;
@@ -1042,7 +1111,7 @@ html, body {
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.5);
-    z-index: 140;
+    z-index: 610;
     backdrop-filter: blur(4px);
   }
 
@@ -2464,6 +2533,35 @@ html, body {
 }
 /* ── Mobile Hero Fixes ── */
 @media (max-width: 768px) {
+  .app-layout.has-login-banner .search-container {
+    margin-top: 88px;
+  }
+
+  .app-layout.has-login-banner .mobile-menu-btn {
+    top: calc(12px + 88px);
+  }
+
+  .login-nudge-banner {
+    padding-top: calc(10px + env(safe-area-inset-top, 0px));
+    border-bottom-left-radius: 14px;
+    border-bottom-right-radius: 14px;
+  }
+
+  .login-nudge-text {
+    font-size: 12px;
+    line-height: 1.25;
+  }
+
+  .hero-scroll-nav {
+    margin: -8px 0 14px;
+    padding-bottom: 6px;
+  }
+
+  .hero-scroll-chip {
+    font-size: 11px;
+    padding: 7px 12px;
+  }
+
   .premium-hero {
     min-height: 220px;
     padding: 20px;
