@@ -238,6 +238,7 @@ export default function Home() {
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef(null);
   const searchTimer = useRef(null);
+  const ytResultsCacheRef = useRef(new Map()); // client-side cache: query → ytResults
 
   // Use refs for queue to avoid stale closures in next/prev
   const queueRef = useRef([]);
@@ -655,12 +656,18 @@ export default function Home() {
     if (!search.trim()) { setSearchResults([]); setYtResults([]); setIsSearching(false); setIsSearchingYT(false); return; }
 
     setIsSearching(true);
-    setIsSearchingYT(true);
+
+    // Show cached YT results instantly if available
+    const cachedYT = ytResultsCacheRef.current.get(search.trim().toLowerCase());
+    if (cachedYT?.length) { setYtResults(cachedYT); setIsSearchingYT(false); }
+    else setIsSearchingYT(true);
+
     searchTimer.current = setTimeout(async () => {
       const q = search.trim();
+      const qKey = q.toLowerCase();
 
-      // Instant local filter from cache (shows immediately)
-      const localQ = q.toLowerCase();
+      // Instant local filter
+      const localQ = qKey;
       const localHits = cachedSongs.filter(s =>
         s.title?.toLowerCase().includes(localQ) ||
         s.artist?.toLowerCase().includes(localQ) ||
@@ -668,34 +675,47 @@ export default function Home() {
       ).slice(0, 30);
       setSearchResults(localHits);
 
-      // Fire DB search and YouTube search in parallel — always
+      // DB + YT in parallel
       const dbPromise = fetch(`/api/search?q=${encodeURIComponent(q)}`)
         .then(r => r.json())
         .catch(() => null);
 
       const ytPromise = searchYouTubeFallback(q, true)
-        .then(d => {
-          const arr = Array.isArray(d) ? d : (d?.results || []);
-          return arr;
-        })
+        .then(d => Array.isArray(d) ? d : (d?.results || []))
         .catch(() => []);
 
-      // Update DB results as soon as they arrive
+      // DB results
       dbPromise.then(data => {
         if (!data) return;
         if (data.songs?.length) setSearchResults(data.songs);
         else if (localHits.length === 0) setSearchResults([]);
-        // If the search API already returned ytResults, use them
-        if (data.ytResults?.length) setYtResults(data.ytResults);
+        if (data.ytResults?.length) {
+          setYtResults(data.ytResults);
+          ytResultsCacheRef.current.set(qKey, data.ytResults);
+          setIsSearchingYT(false);
+        }
       }).catch(() => {});
 
-      // Update YT results as soon as they arrive
-      ytPromise.then(arr => {
-        if (arr.length) setYtResults(arr);
-        setIsSearchingYT(false);
+      // YT results — update when they arrive, retry once if empty
+      ytPromise.then(async arr => {
+        if (arr.length) {
+          setYtResults(arr);
+          ytResultsCacheRef.current.set(qKey, arr);
+          setIsSearchingYT(false);
+        } else if (!ytResultsCacheRef.current.get(qKey)?.length) {
+          // Retry once with a slightly different query
+          try {
+            const retry = await searchYouTubeFallback(`${q} song`, true);
+            const retryArr = Array.isArray(retry) ? retry : (retry?.results || []);
+            if (retryArr.length) {
+              setYtResults(retryArr);
+              ytResultsCacheRef.current.set(qKey, retryArr);
+            }
+          } catch {}
+          setIsSearchingYT(false);
+        }
       }).catch(() => setIsSearchingYT(false));
 
-      // Wait for both before clearing main loading
       await Promise.allSettled([dbPromise, ytPromise]);
       setIsSearching(false);
     }, 350);

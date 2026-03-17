@@ -55,32 +55,22 @@ export async function GET(request) {
     const client = await clientPromise;
     const db = client.db('sonix_music');
 
-    // 1. Search MongoDB first
-    const dbResults = await searchDB(db, q);
+    // Run DB search and YT search in parallel — always
+    const [dbResults, ytFromPiped, ytFromInvidious] = await Promise.allSettled([
+      searchDB(db, q),
+      searchWithPipedDirect(q, true),
+      searchWithInvidiousDirect(q, true),
+    ]);
 
-    if (dbResults.length >= 8) {
-      // Enough DB results — skip YouTube entirely
-      return NextResponse.json({ songs: dbResults, source: 'db', ytResults: [] });
-    }
+    const songs = dbResults.status === 'fulfilled' ? (dbResults.value || []) : [];
 
-    // 2. Check cache for YouTube results
-    const cached = await getCached(q);
-    if (cached) {
-      return NextResponse.json({ songs: dbResults, source: 'hybrid', ytResults: cached });
-    }
+    // Check cache for YT results
+    let ytResults = await getCached(q);
 
-    // 3. YouTube Data API v3 (quota-tracked)
-    let ytResults = await searchYouTubeAPI(q, 8);
-
-    // 4. Fallback: Piped + Invidious in parallel
     if (!ytResults?.length) {
-      const [pipedRes, invRes] = await Promise.allSettled([
-        searchWithPipedDirect(q, true),
-        searchWithInvidiousDirect(q, true),
-      ]);
-
+      // Merge Piped + Invidious results
       const merged = [], seen = new Set();
-      for (const r of [pipedRes, invRes]) {
+      for (const r of [ytFromPiped, ytFromInvidious]) {
         if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
         for (const v of r.value) {
           if (!v?.videoId || seen.has(v.videoId)) continue;
@@ -88,14 +78,13 @@ export async function GET(request) {
           merged.push(v);
         }
       }
-      ytResults = merged.slice(0, 10);
+      ytResults = merged.slice(0, 12);
+      if (ytResults.length) await setCached(q, ytResults);
     }
 
-    if (ytResults?.length) await setCached(q, ytResults);
-
     return NextResponse.json({
-      songs: dbResults,
-      source: dbResults.length ? 'hybrid' : 'youtube',
+      songs,
+      source: songs.length ? 'hybrid' : 'youtube',
       ytResults: ytResults || [],
     });
   } catch (error) {

@@ -17,7 +17,29 @@ const INVIDIOUS_INSTANCES = [
   'https://invidious.protokolla.fi',
   'https://yt.artemislena.eu',
   'https://invidious.perennialte.ch',
+  'https://iv.datura.network',
+  'https://invidious.fdn.fr',
 ];
+
+// Server-side cache: query → { results, ts }
+const ytCache = globalThis.__sonix_yt_cache || new Map();
+if (!globalThis.__sonix_yt_cache) globalThis.__sonix_yt_cache = ytCache;
+const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+
+function getCached(q) {
+  const entry = ytCache.get(q);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > CACHE_TTL) { ytCache.delete(q); return null; }
+  return entry.results;
+}
+function setCached(q, results) {
+  ytCache.set(q, { results, ts: Date.now() });
+  // Keep cache size bounded
+  if (ytCache.size > 200) {
+    const oldest = [...ytCache.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
+    ytCache.delete(oldest[0]);
+  }
+}
 
 function mapVideo(videoId, title, artist, thumbnail) {
   return {
@@ -29,11 +51,11 @@ function mapVideo(videoId, title, artist, thumbnail) {
 }
 
 async function searchWithInvidious(query, multi = false) {
-  const calls = INVIDIOUS_INSTANCES.slice(0, 4).map(async (instance) => {
+  const calls = INVIDIOUS_INSTANCES.slice(0, 5).map(async (instance) => {
     try {
       const url = `${instance}/api/v1/search?q=${encodeURIComponent(query)}&type=video&sort_by=relevance`;
       const res = await fetch(url, {
-        signal: AbortSignal.timeout(3000),
+        signal: AbortSignal.timeout(4000),
         headers: { 'Accept': 'application/json' }
       });
       if (!res.ok) return null;
@@ -46,9 +68,7 @@ async function searchWithInvidious(query, multi = false) {
       }
       const first = videos[0];
       return mapVideo(first.videoId, first.title, first.author, first.videoThumbnails?.[0]?.url);
-    } catch {
-      return null;
-    }
+    } catch { return null; }
   });
 
   const settled = await Promise.allSettled(calls);
@@ -73,12 +93,12 @@ async function searchWithInvidious(query, multi = false) {
 async function searchWithPiped(query, multi = false) {
   const filters = ['music_songs', 'videos'];
   const calls = [];
-  for (const instance of PIPED_INSTANCES.slice(0, 4)) {
+  for (const instance of PIPED_INSTANCES.slice(0, 5)) {
     for (const filter of filters) {
       calls.push((async () => {
         try {
           const url = `${instance}/search?q=${encodeURIComponent(query)}&filter=${filter}`;
-          const res = await fetch(url, { signal: AbortSignal.timeout(2500) });
+          const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
           if (!res.ok) return null;
           const data = await res.json();
           const items = (data.items || data || []).filter((i) => i?.url?.includes('/watch'));
@@ -93,9 +113,7 @@ async function searchWithPiped(query, multi = false) {
           const videoId = first.url.split('v=')[1]?.split('&')[0];
           if (!videoId) return null;
           return mapVideo(videoId, first.title, first.uploaderName || first.uploader, first.thumbnail);
-        } catch {
-          return null;
-        }
+        } catch { return null; }
       })());
     }
   }
@@ -118,29 +136,51 @@ async function searchWithPiped(query, multi = false) {
   return null;
 }
 
-async function searchWithYTScrape(query) {
+async function searchWithYTScrape(query, multi = false) {
   try {
     const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}&sp=EgIQAQ%253D%253D`;
     const res = await fetch(url, {
-      signal: AbortSignal.timeout(3500),
+      signal: AbortSignal.timeout(5000),
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml',
       }
     });
     if (!res.ok) return null;
     const html = await res.text();
+
+    if (multi) {
+      // Extract videoId + title pairs from ytInitialData
+      const matches = [...html.matchAll(/"videoId":"([a-zA-Z0-9_-]{11})","thumbnail".*?"title":\{"runs":\[\{"text":"([^"]+)"/g)];
+      if (!matches.length) {
+        // Fallback: just extract IDs
+        const idMatches = [...html.matchAll(/"videoId":"([a-zA-Z0-9_-]{11})"/g)];
+        const seen = new Set(), results = [];
+        for (const m of idMatches) {
+          if (!seen.has(m[1])) { seen.add(m[1]); results.push(mapVideo(m[1], '', '', '')); }
+          if (results.length >= 10) break;
+        }
+        return results.length ? results : null;
+      }
+      const seen = new Set(), results = [];
+      for (const m of matches) {
+        if (!seen.has(m[1])) {
+          seen.add(m[1]);
+          results.push(mapVideo(m[1], m[2] || '', '', ''));
+        }
+        if (results.length >= 10) break;
+      }
+      return results.length ? results : null;
+    }
+
     const videoIdMatch = html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
     if (!videoIdMatch) return null;
     return mapVideo(videoIdMatch[1], '', '', `https://img.youtube.com/vi/${videoIdMatch[1]}/mqdefault.jpg`);
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
-// Get direct audio stream URL from Invidious/Piped for native Android playback
 async function getStreamUrl(videoId) {
-  // Try Invidious first
   for (const instance of INVIDIOUS_INSTANCES) {
     try {
       const res = await fetch(`${instance}/api/v1/videos/${videoId}?fields=adaptiveFormats`, {
@@ -155,13 +195,9 @@ async function getStreamUrl(videoId) {
       if (audioFormats.length > 0) return audioFormats[0].url;
     } catch { continue; }
   }
-
-  // Try Piped
   for (const instance of PIPED_INSTANCES) {
     try {
-      const res = await fetch(`${instance}/streams/${videoId}`, {
-        signal: AbortSignal.timeout(4000)
-      });
+      const res = await fetch(`${instance}/streams/${videoId}`, { signal: AbortSignal.timeout(4000) });
       if (!res.ok) continue;
       const data = await res.json();
       if (data.audioStreams?.length > 0) {
@@ -170,7 +206,6 @@ async function getStreamUrl(videoId) {
       }
     } catch { continue; }
   }
-
   return null;
 }
 
@@ -178,53 +213,74 @@ export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const q = searchParams.get('q') || '';
   const multi = searchParams.get('multi') === 'true';
-  const withStream = searchParams.get('stream') === 'true'; // new: get stream URL too
+  const withStream = searchParams.get('stream') === 'true';
 
-  if (!q) {
-    return NextResponse.json({ error: 'Missing query' }, { status: 400 });
+  if (!q) return NextResponse.json({ error: 'Missing query' }, { status: 400 });
+
+  // Serve from cache if available
+  if (multi) {
+    const cached = getCached(q);
+    if (cached) return NextResponse.json({ results: cached });
   }
 
   try {
+    // Run all three sources in parallel
     const [invidiousResult, pipedResult, scrapeResult] = await Promise.allSettled([
       searchWithInvidious(q, multi),
       searchWithPiped(q, multi),
-      searchWithYTScrape(q),
+      multi ? searchWithYTScrape(q, true) : Promise.resolve(null),
     ]);
 
     if (multi) {
       const results = [], seen = new Set();
-      [invidiousResult, pipedResult].forEach((res) => {
-        if (res.status !== 'fulfilled' || !Array.isArray(res.value)) return;
-        res.value.forEach((v) => {
-          if (!v?.videoId || seen.has(v.videoId)) return;
+      for (const res of [invidiousResult, pipedResult, scrapeResult]) {
+        if (res.status !== 'fulfilled' || !Array.isArray(res.value)) continue;
+        for (const v of res.value) {
+          if (!v?.videoId || seen.has(v.videoId)) continue;
           seen.add(v.videoId);
           results.push(v);
-        });
-      });
-      return NextResponse.json({ results: results.slice(0, 15) });
+        }
+      }
+
+      // Last resort: scrape if still empty
+      if (!results.length) {
+        const scraped = await searchWithYTScrape(q, true);
+        if (Array.isArray(scraped)) {
+          for (const v of scraped) {
+            if (!v?.videoId || seen.has(v.videoId)) continue;
+            seen.add(v.videoId);
+            results.push(v);
+          }
+        }
+      }
+
+      const final = results.slice(0, 15);
+      if (final.length) setCached(q, final);
+      return NextResponse.json({ results: final });
     }
 
+    // Single result
     let found = null;
-    for (const result of [invidiousResult, pipedResult, scrapeResult]) {
-      if (result.status === 'fulfilled' && result.value?.videoId) {
-        found = result.value;
-        break;
-      }
+    for (const result of [invidiousResult, pipedResult]) {
+      if (result.status === 'fulfilled' && result.value?.videoId) { found = result.value; break; }
+    }
+
+    // Fallback to scrape
+    if (!found) {
+      const scraped = await searchWithYTScrape(q, false);
+      if (scraped?.videoId) found = scraped;
     }
 
     if (!found) {
       const simpleQ = q.replace(/official audio|official|audio|full song/gi, '').trim();
       if (simpleQ !== q) {
-        const retryResult = await searchWithYTScrape(simpleQ);
-        if (retryResult?.videoId) found = retryResult;
+        const retry = await searchWithYTScrape(simpleQ, false);
+        if (retry?.videoId) found = retry;
       }
     }
 
-    if (!found) {
-      return NextResponse.json({ videoId: null, error: 'No results found' });
-    }
+    if (!found) return NextResponse.json({ videoId: null, error: 'No results found' });
 
-    // If Android native player requested stream URL, fetch it in parallel
     if (withStream && found.videoId) {
       const streamUrl = await getStreamUrl(found.videoId);
       return NextResponse.json({ ...found, streamUrl: streamUrl || null });
@@ -232,7 +288,7 @@ export async function GET(request) {
 
     return NextResponse.json(found);
   } catch (err) {
-    console.error('Final search crash:', err);
+    console.error('YT search crash:', err);
     return NextResponse.json({ error: 'Search Engine Error', details: err.message }, { status: 500 });
   }
 }
