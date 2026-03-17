@@ -124,14 +124,24 @@ function useYouTubePlayer() {
 
   function startTimer() {
     stopTimer();
-    timerRef.current = setInterval(() => {
+    let rafId;
+    function tick() {
       if (playerRef.current && typeof playerRef.current.getCurrentTime === 'function') {
         setCurrentTime(playerRef.current.getCurrentTime());
-        setDuration(playerRef.current.getDuration());
+        const d = playerRef.current.getDuration();
+        if (d > 0) setDuration(d);
       }
-    }, 500);
+      rafId = requestAnimationFrame(tick);
+    }
+    rafId = requestAnimationFrame(tick);
+    timerRef.current = rafId;
   }
-  function stopTimer() { if (timerRef.current) clearInterval(timerRef.current); }
+  function stopTimer() {
+    if (timerRef.current) {
+      cancelAnimationFrame(timerRef.current);
+      timerRef.current = null;
+    }
+  }
 
   function isReady() { return playerRef.current && typeof playerRef.current.playVideo === 'function'; }
 
@@ -1183,30 +1193,62 @@ export default function Home() {
       setOptimisticPlaying(false);
       yt.pause();
     } else {
-      // Flip optimistic state immediately so button shows ⏸ right away
       setOptimisticPlaying(true);
-      // Check if the correct video is already loaded in the player
-      const expectedVideoId = currentSong.videoId || yt.loadedVideoIdRef.current;
-      if (expectedVideoId && yt.loadedVideoIdRef.current === expectedVideoId) {
-        // Correct video is loaded — just resume
-        yt.play();
-      } else if (expectedVideoId) {
-        // Wrong/no video loaded — load the correct one
-        yt.playVideoById(expectedVideoId);
+      // Always use currentSong.videoId as the source of truth — never rely on loadedVideoIdRef
+      // which can be stale after navigating away and back
+      const videoId = currentSong.videoId;
+      if (videoId) {
+        if (yt.loadedVideoIdRef.current === videoId) {
+          // Same video already loaded — just resume
+          yt.play();
+        } else {
+          // Load and play the correct video
+          yt.playVideoById(videoId);
+        }
       } else {
-        // No videoId known — search for it
+        // DB song with no videoId cached — search YT
         yt.searchAndPlay(currentSong.title, currentSong.artist);
       }
     }
   }
 
   function handleSeek(timeInSeconds) {
-    if (nativeAndroid && currentSong) {
-      NativeMusicPlayer.seekTo({ positionMs: timeInSeconds * 1000 });
+    if (!currentSong) return;
+    const t = Math.max(0, timeInSeconds);
+    if (nativeAndroid) {
+      NativeMusicPlayer.seekTo({ positionMs: t * 1000 }).catch(() => {});
     } else {
-      yt.seekTo(timeInSeconds);
+      yt.seekTo(t);
+      // Optimistically update the displayed time immediately
+      yt.updateNativeTime(t, yt.duration);
     }
   }
+
+  // Helper: get X position from mouse or touch event
+  function getEventX(e) {
+    if (e.touches && e.touches.length > 0) return e.touches[0].clientX;
+    if (e.changedTouches && e.changedTouches.length > 0) return e.changedTouches[0].clientX;
+    return e.clientX;
+  }
+
+  function seekFromBarEvent(e) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = getEventX(e);
+    const pct = Math.max(0, Math.min(1, (x - rect.left) / rect.width));
+    const t = pct * (yt.duration || 0);
+    handleSeek(t);
+  }
+
+  // When full player opens and song is set but not playing — auto-resume
+  useEffect(() => {
+    if (!fullPlayerOpen || !currentSong || nativeAndroid) return;
+    // If nothing is loaded or wrong video is loaded, reload it
+    const videoId = currentSong.videoId;
+    if (!videoId) return;
+    if (!yt.isPlaying && yt.loadedVideoIdRef.current !== videoId) {
+      yt.playVideoById(videoId);
+    }
+  }, [fullPlayerOpen]);
 
   async function handleToggleShuffle() {
     const next = !shuffleEnabled;
@@ -1709,13 +1751,7 @@ export default function Home() {
               </div>
               <div className="player-progress">
                 <span className="time">{fmt(yt.currentTime)}</span>
-                <div className="progress-track" onClick={(e) => {
-                  e.stopPropagation();
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  const pct = (e.clientX - rect.left) / rect.width;
-                  yt.updateNativeTime(pct * yt.duration);
-                  handleSeek(pct * yt.duration);
-                }}>
+                <div className="progress-track" onClick={(e) => { e.stopPropagation(); seekFromBarEvent(e); }}>
                   <div className="progress-filled" style={{ width: yt.duration ? `${(yt.currentTime / yt.duration) * 100}%` : '0%' }}></div>
                 </div>
                 <span className="time">{fmt(yt.duration)}</span>
@@ -1804,12 +1840,11 @@ export default function Home() {
 
             {/* Progress */}
             <div className="sp-progress-wrap">
-              <div className="sp-progress-track" onClick={(e) => {
-                const rect = e.currentTarget.getBoundingClientRect();
-                const pct = (e.clientX - rect.left) / rect.width;
-                yt.updateNativeTime(pct * yt.duration);
-                handleSeek(pct * yt.duration);
-              }}>
+              <div
+                className="sp-progress-track"
+                onClick={seekFromBarEvent}
+                onTouchEnd={(e) => { e.preventDefault(); seekFromBarEvent(e); }}
+              >
                 <div className="sp-progress-fill" style={{ width: yt.duration ? `${(yt.currentTime / yt.duration) * 100}%` : '0%' }} />
                 <div className="sp-progress-thumb" style={{ left: yt.duration ? `${(yt.currentTime / yt.duration) * 100}%` : '0%' }} />
               </div>
