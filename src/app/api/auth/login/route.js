@@ -1,19 +1,21 @@
 import { NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
-import { connectDB } from '@/lib/mongoose';
-import User from '@/models/User';
+import clientPromise from '@/lib/mongodb';
 import { signToken } from '@/lib/auth';
 
 export async function POST(request) {
   try {
     const { email, password } = await request.json();
+    const normalizedEmail = (email || '').trim().toLowerCase();
 
-    if (!email || !password)
+    if (!normalizedEmail || !password)
       return NextResponse.json({ error: 'Email and password are required' }, { status: 400 });
 
-    await connectDB();
+    const client = await clientPromise;
+    const db = client.db('sonix_music');
+    const users = db.collection('users');
 
-    const user = await User.findOne({ email });
+    const user = await users.findOne({ email: normalizedEmail });
     if (!user)
       return NextResponse.json({ error: 'Invalid email or password' }, { status: 401 });
 

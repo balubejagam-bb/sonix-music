@@ -1,27 +1,45 @@
 import { NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
-import { connectDB } from '@/lib/mongoose';
-import User from '@/models/User';
+import clientPromise from '@/lib/mongodb';
 import { signToken } from '@/lib/auth';
 
 export async function POST(request) {
   try {
     const { name, email, password } = await request.json();
+    const normalizedEmail = (email || '').trim().toLowerCase();
+    const normalizedName = (name || '').trim();
 
-    if (!name || !email || !password)
+    if (!normalizedName || !normalizedEmail || !password)
       return NextResponse.json({ error: 'All fields are required' }, { status: 400 });
 
     if (password.length < 6)
       return NextResponse.json({ error: 'Password must be at least 6 characters' }, { status: 400 });
 
-    await connectDB();
+    const client = await clientPromise;
+    const db = client.db('sonix_music');
+    const users = db.collection('users');
 
-    const existing = await User.findOne({ email });
+    const existing = await users.findOne({ email: normalizedEmail });
     if (existing)
       return NextResponse.json({ error: 'Email already registered' }, { status: 409 });
 
     const hashedPassword = await bcrypt.hash(password, 12);
-    const user = await User.create({ name, email, password: hashedPassword });
+    const userDoc = {
+      name: normalizedName,
+      email: normalizedEmail,
+      password: hashedPassword,
+      profileImage: '',
+      likedSongs: [],
+      recentlyPlayed: [],
+      recentSongObjects: [],
+      library: [],
+      playlists: [],
+      isAdmin: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const inserted = await users.insertOne(userDoc);
+    const user = { ...userDoc, _id: inserted.insertedId };
 
     const token = signToken({ userId: user._id.toString(), email: user.email });
 

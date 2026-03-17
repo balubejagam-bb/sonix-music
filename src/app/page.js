@@ -1337,15 +1337,28 @@ export default function Home() {
             return;
           }
 
-          // Stream resolution failed — show error, don't fall back to iframe on Android
-          console.warn('[Android] Stream resolution failed for:', song.title);
+          // Stream resolution failed — fallback to YouTube iframe so song still plays.
+          console.warn('[Android] Native stream failed, falling back to YouTube for:', song.title);
+          const fallbackVideoId = videoId || await resolveSongVideoId(song);
+          setCurrentSong({ ...song, videoId: fallbackVideoId || song.videoId || null });
+          setNativeIsPlaying(false);
+          nativeShouldPlayRef.current = false;
+          setVideoEnabled(false);
+          if (fallbackVideoId) {
+            yt.playVideoById(fallbackVideoId);
+            isLoadingSongRef.current = false;
+            setIsLoadingSong(false);
+            setLoadingSongKey(null);
+            return;
+          }
+
+          const ok = await yt.searchAndPlay(song.title || '', song.artist || '', song.type || 'song');
+          if (!ok) {
+            console.error('[Android] Both native stream and YT fallback failed:', song.title);
+          }
           isLoadingSongRef.current = false;
           setIsLoadingSong(false);
           setLoadingSongKey(null);
-          // Still set currentSong so UI shows the song, but it won't play in background
-          setCurrentSong({ ...song, videoId });
-          setNativeIsPlaying(false);
-          nativeShouldPlayRef.current = false;
           return;
 
         } catch (nativeErr) {
@@ -1626,8 +1639,16 @@ export default function Home() {
   async function switchToVideoMode() {
     if (!currentSong) return;
     if (nativeAndroid) {
-      // Keep Android on native audio path for stable background/lockscreen playback.
-      setVideoEnabled(false);
+      const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
+      if (!videoId) return;
+      try {
+        await NativeMusicPlayer.pause();
+      } catch {}
+      nativeShouldPlayRef.current = false;
+      setNativeIsPlaying(false);
+      setVideoEnabled(true);
+      yt.playVideoById(videoId);
+      if (!currentSong.videoId) setCurrentSong(prev => prev ? { ...prev, videoId } : prev);
       return;
     }
     const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
@@ -1652,6 +1673,28 @@ export default function Home() {
       return;
     }
     if (nativeAndroid) {
+      if (videoEnabled) {
+        const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
+        const streamUrl = await resolveAudioStreamForSong(currentSong, videoId);
+        if (streamUrl) {
+          try {
+            await NativeMusicPlayer.playQueue({
+              queue: [{
+                url: streamUrl,
+                title: currentSong.title || 'Unknown Track',
+                artist: currentSong.artist || 'Unknown Artist',
+                album: currentSong.album || 'Sonix Music',
+                artwork: currentSong.image || currentSong.thumbnail || '',
+              }],
+              index: 0,
+              shuffle: false,
+              repeatMode,
+            });
+            setNativeIsPlaying(true);
+            nativeShouldPlayRef.current = true;
+          } catch {}
+        }
+      }
       setVideoEnabled(false);
       return;
     }
@@ -2481,7 +2524,7 @@ export default function Home() {
               <button className="sp-down-btn" onClick={() => setFullPlayerOpen(false)}>▼</button>
               <div className="sp-mode-switch">
                 <button className={videoEnabled ? '' : 'active'} onClick={switchToAudioMode}>Audio</button>
-                  <button className={videoEnabled ? 'active' : ''} onClick={switchToVideoMode} disabled={nativeAndroid} title={nativeAndroid ? 'Video mode disabled on Android for stable background audio' : 'Video'}>Video</button>
+                  <button className={videoEnabled ? 'active' : ''} onClick={switchToVideoMode} title={nativeAndroid ? 'Video mode may stop background playback on Android' : 'Video'}>Video</button>
               </div>
               <span style={{ width: 36 }} />
             </div>
