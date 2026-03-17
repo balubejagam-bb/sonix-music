@@ -309,15 +309,10 @@ export default function Home() {
     initNativeBackground();
 
     const onVisibilityChange = async () => {
-      // Redundant with MusicPlaybackService (Media3)
-      // if (!canUseNativePlugins() || !BackgroundMode) return;
-      // if (!document.hidden) return;
-      // try {
-      //   await BackgroundMode.enable();
-      //   await BackgroundMode.updateNotification({ title: 'Sonix Music', text: 'Playing in background', hidden: false });
-      // } catch (e) {
-      //   console.error('Background mode resume error:', e);
-      // }
+      // Pause on tab/app switch for web (not native Android — handled by Media3)
+      if (document.hidden && !nativeAndroid) {
+        yt.pause();
+      }
     };
 
     document.addEventListener('visibilitychange', onVisibilityChange);
@@ -1675,88 +1670,87 @@ export default function Home() {
         )}
       </div>
 
-      {/* Full Screen Player & Visualizer */}
+      {/* Full Screen Player — Spotify style */}
       <div className={`full-player ${fullPlayerOpen ? 'open' : ''}`}>
         {currentSong && (
-          <div className="full-player-content">
-            <button className="close-full-player" onClick={() => setFullPlayerOpen(false)}>▼</button>
-            
-            {/* Visualizer Background */}
-            <div className={`visualizer-bg ${visualizer} ${activePlaying ? 'playing' : ''}`}></div>
+          <div className="full-player-content spotify-player">
+            {/* Blurred album art background */}
+            <div
+              className="sp-bg"
+              style={{ backgroundImage: currentSong.image ? `url(${currentSong.image})` : 'none' }}
+            />
+            <div className="sp-bg-overlay" />
 
-            <div className="full-player-grid">
-              <div className="full-player-left">
-                <div 
-                  className={`artwork-container ${activePlaying ? 'playing' : ''}`}
-                  onTouchStart={handleTouchStart}
-                  onTouchEnd={handleTouchEnd}
+            {/* Header */}
+            <div className="sp-header">
+              <button className="sp-down-btn" onClick={() => setFullPlayerOpen(false)}>▼</button>
+              <span className="sp-header-label">Now Playing</span>
+              <span style={{ width: 36 }} />
+            </div>
+
+            {/* Disc artwork */}
+            <div
+              className="sp-disc-wrap"
+              onTouchStart={handleTouchStart}
+              onTouchEnd={handleTouchEnd}
+            >
+              <div className="sp-disc">
+                <div className="sp-disc-ring" />
+                {currentSong.image ? (
+                  <img src={currentSong.image} className={`sp-disc-img ${activePlaying ? 'spin' : ''}`} alt="" />
+                ) : (
+                  <div className="sp-disc-img sp-disc-placeholder">🎵</div>
+                )}
+                <div className="sp-disc-center" />
+              </div>
+            </div>
+
+            {/* Song info + like */}
+            <div className="sp-info-row">
+              <div className="sp-info">
+                <div className="sp-title">{decodeHtml(currentSong.title)}</div>
+                <div className="sp-artist">{decodeHtml(currentSong.artist)}</div>
+              </div>
+              {user && (
+                <button
+                  className="sp-like-btn"
+                  onClick={() => toggleLike(songKey(currentSong), currentSong)}
                 >
-                  <div className="vinyl-overlay">
-                    <div className="vinyl-lines"></div>
-                    <div className="vinyl-center"></div>
-                  </div>
-                  {currentSong.image ? (
-                    <img src={currentSong.image} className={`artwork ${activePlaying ? 'spin' : ''}`} alt="" />
-                  ) : (
-                    <div className="artwork placeholder">🎵</div>
-                  )}
-                </div>
-                {/* Song meta sits next to artwork on mobile */}
-                <div className="song-meta">
-                  <div className="title">{decodeHtml(currentSong.title)}</div>
-                  <div className="artist">{decodeHtml(currentSong.artist)}</div>
-                </div>
+                  {likedSongs.has(songKey(currentSong)) ? '💚' : '🤍'}
+                </button>
+              )}
+            </div>
+
+            {/* Progress */}
+            <div className="sp-progress-wrap">
+              <div className="sp-progress-track" onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                const pct = (e.clientX - rect.left) / rect.width;
+                yt.updateNativeTime(pct * yt.duration);
+                handleSeek(pct * yt.duration);
+              }}>
+                <div className="sp-progress-fill" style={{ width: yt.duration ? `${(yt.currentTime / yt.duration) * 100}%` : '0%' }} />
+                <div className="sp-progress-thumb" style={{ left: yt.duration ? `${(yt.currentTime / yt.duration) * 100}%` : '0%' }} />
               </div>
-
-              <div className="full-player-right">
-                {/* Song meta shown above progress on desktop only */}
-                <div className="song-meta desktop-only-meta">
-                  <div className="title">{decodeHtml(currentSong.title)}</div>
-                  <div className="artist">{decodeHtml(currentSong.artist)}</div>
-                </div>
-
-                <div className="audio-beats-panel">
-                  <div className="panel-title">Visual Experience</div>
-                  <div className="visualizer-options">
-                    <button className={visualizer === 'waves' ? 'active' : ''} onClick={() => setVisualizer('waves')}>Fluid Waves</button>
-                    <button className={visualizer === 'bars' ? 'active' : ''} onClick={() => setVisualizer('bars')}>Neon Bars</button>
-                    <button className={visualizer === 'pulse' ? 'active' : ''} onClick={() => setVisualizer('pulse')}>Atmosphere</button>
-                  </div>
-                  <p className="note">Premium Visualizer Active</p>
-                </div>
-
-                <div className="progress-container">
-                  <div className="time-row">
-                    <span>{fmt(yt.currentTime)}</span>
-                    <span>{fmt(yt.duration)}</span>
-                  </div>
-                  <div className="progress-track-lg" onClick={(e) => {
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    const pct = (e.clientX - rect.left) / rect.width;
-                    yt.updateNativeTime(pct * yt.duration);
-                    handleSeek(pct * yt.duration);
-                  }}>
-                    <div className="progress-filled" style={{ width: yt.duration ? `${(yt.currentTime / yt.duration) * 100}%` : '0%' }}></div>
-                  </div>
-                </div>
-
-                <div className="controls-row-lg">
-                  <button className="icon-btn" onClick={handleToggleShuffle}>{shuffleEnabled ? '🔀' : '➡️'}</button>
-                  <button className="icon-btn skip" onClick={handlePrev}>⏮</button>
-                  <button className="play-pause-btn-lg" onClick={handlePlayPauseToggle}>
-                    {isLoadingSong ? <div className="spinner-small"></div> : activePlaying ? '⏸' : '▶'}
-                  </button>
-                  <button className="icon-btn skip" onClick={handleNext}>⏭</button>
-                  <button className="icon-btn" onClick={handleCycleRepeat}>{repeatLabel}</button>
-                </div>
-
-                {/* Mini visualizer row — mobile only */}
-                <div className="mobile-viz-row">
-                  <button className={`pill ${visualizer === 'waves' ? 'active' : ''}`} style={{ padding: '4px 12px', fontSize: 11 }} onClick={() => setVisualizer('waves')}>🌊</button>
-                  <button className={`pill ${visualizer === 'bars' ? 'active' : ''}`} style={{ padding: '4px 12px', fontSize: 11 }} onClick={() => setVisualizer('bars')}>📊</button>
-                  <button className={`pill ${visualizer === 'pulse' ? 'active' : ''}`} style={{ padding: '4px 12px', fontSize: 11 }} onClick={() => setVisualizer('pulse')}>💫</button>
-                </div>
+              <div className="sp-times">
+                <span>{fmt(yt.currentTime)}</span>
+                <span>{fmt(yt.duration)}</span>
               </div>
+            </div>
+
+            {/* Controls */}
+            <div className="sp-controls">
+              <button className={`sp-ctrl-btn ${shuffleEnabled ? 'active' : ''}`} onClick={handleToggleShuffle} title="Shuffle">
+                🔀
+              </button>
+              <button className="sp-ctrl-btn sp-skip" onClick={handlePrev} title="Previous">⏮</button>
+              <button className="sp-play-btn" onClick={handlePlayPauseToggle}>
+                {isLoadingSong ? <div className="spinner-small"></div> : activePlaying ? '⏸' : '▶'}
+              </button>
+              <button className="sp-ctrl-btn sp-skip" onClick={handleNext} title="Next">⏭</button>
+              <button className={`sp-ctrl-btn ${repeatMode !== 'off' ? 'active' : ''}`} onClick={handleCycleRepeat} title="Repeat">
+                {repeatMode === 'one' ? '🔂' : '🔁'}
+              </button>
             </div>
           </div>
         )}
