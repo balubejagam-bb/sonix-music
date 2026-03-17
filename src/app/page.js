@@ -457,6 +457,10 @@ export default function Home() {
     return clientApiPath(path);
   }
 
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   async function fetchJsonWithTimeout(url, timeoutMs = 10000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -1393,6 +1397,40 @@ export default function Home() {
             });
             if (isStale()) return;
 
+            // Verify native player actually started; if not, fail over to web audio/video.
+            let nativeReady = false;
+            for (let i = 0; i < 3; i++) {
+              await sleep(700);
+              if (isStale()) return;
+              try {
+                const st = await NativeMusicPlayer.getPosition();
+                const hasProgress = (st?.duration || 0) > 0 || (st?.currentTime || 0) > 0;
+                if (st?.isPlaying || hasProgress) {
+                  nativeReady = true;
+                  break;
+                }
+              } catch {}
+            }
+
+            if (!nativeReady) {
+              console.warn('[Android] Native player did not start; falling back to web audio path.');
+              nativeTrackLoadedRef.current = false;
+              setNativeIsPlaying(false);
+              nativeShouldPlayRef.current = false;
+              setCurrentSong(songWithUrl);
+              if (videoId) {
+                const webStream = await resolveAudioStreamForSong(songWithUrl, videoId);
+                if (webStream) yt.playStream(webStream);
+                else yt.playVideoById(videoId);
+              } else {
+                await yt.searchAndPlay(song.title || '', song.artist || '', song.type || 'song');
+              }
+              isLoadingSongRef.current = false;
+              setIsLoadingSong(false);
+              setLoadingSongKey(null);
+              return;
+            }
+
             queueRef.current = queueSource.length ? queueSource : [songWithUrl];
             queueIndexRef.current = Math.max(0, queueSource.findIndex(s => songKey(s) === key));
             setCurrentSong(songWithUrl);
@@ -1721,7 +1759,62 @@ export default function Home() {
       const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
       if (!videoId) return;
       try {
-        await NativeMusicPlayer.pause();
+      const resumeAt = yt.currentTime || 0;
+      setVideoEnabled(false);
+
+      // If native track is already loaded, resume that.
+      if (nativeTrackLoadedRef.current) {
+        try {
+          await NativeMusicPlayer.resume();
+          if (resumeAt > 0) {
+            await NativeMusicPlayer.seekTo({ positionMs: resumeAt * 1000 }).catch(() => {});
+          }
+          setNativeIsPlaying(true);
+          nativeShouldPlayRef.current = true;
+          return;
+        } catch {}
+      }
+
+      const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
+      const streamUrl = await resolveAudioStreamForSong(currentSong, videoId);
+
+      if (streamUrl) {
+        try {
+          await NativeMusicPlayer.playQueue({
+            queue: [{
+              url: streamUrl,
+              title: currentSong.title || 'Unknown Track',
+              artist: currentSong.artist || 'Unknown Artist',
+              album: currentSong.album || 'Sonix Music',
+              artwork: currentSong.image || currentSong.thumbnail || '',
+            }],
+            index: 0,
+            shuffle: shuffleEnabled,
+            repeatMode,
+          });
+          if (resumeAt > 0) {
+            await NativeMusicPlayer.seekTo({ positionMs: resumeAt * 1000 }).catch(() => {});
+          }
+          setCurrentSong(prev => prev ? { ...prev, url: streamUrl, videoId: videoId || prev.videoId } : prev);
+          nativeTrackLoadedRef.current = true;
+          setNativeIsPlaying(true);
+          nativeShouldPlayRef.current = true;
+          return;
+        } catch {}
+      }
+
+      // Final fallback: web audio/video to ensure user can still hear playback.
+      nativeTrackLoadedRef.current = false;
+      setNativeIsPlaying(false);
+      nativeShouldPlayRef.current = false;
+      if (streamUrl) {
+        yt.playStream(streamUrl);
+        if (resumeAt > 0) setTimeout(() => yt.seekTo(resumeAt), 120);
+      } else if (videoId) {
+        yt.playVideoById(videoId);
+      } else {
+        yt.searchAndPlay(currentSong.title || '', currentSong.artist || '', currentSong.type || 'song');
+      }
       } catch {}
       nativeShouldPlayRef.current = false;
       setNativeIsPlaying(false);
