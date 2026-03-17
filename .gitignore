@@ -1,6 +1,15 @@
-node_modules/
-.next/
+songs/
+all-podcasts-dataset-master/
+*.csv
+*.tsv
+*.zip
+*.log
 android/
+ios/
+.next/
+out/
+build/
+node_modules/
 .env*
 .DS_Store
 j17/

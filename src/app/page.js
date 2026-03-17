@@ -93,6 +93,32 @@ function useYouTubePlayer() {
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
+    // Create silent audio element for background playback
+    if (!silentAudioRef.current) {
+      try {
+        silentAudioRef.current = new Audio();
+        // Use the public silence.mp3 if it exists, otherwise base64
+        silentAudioRef.current.src = '/silence.mp3'; 
+        silentAudioRef.current.loop = true;
+        silentAudioRef.current.volume = 0.001; 
+        
+        // Secondary audio element for direct streams (to bypass YT iframe limitations)
+        const a = new Audio();
+        a.volume = 0.8;
+        a.onplay = () => setIsPlaying(true);
+        a.onpause = () => setIsPlaying(false);
+        a.onended = () => { if (onEndRef.current) onEndRef.current(); };
+        a.ontimeupdate = () => {
+          setCurrentTime(a.currentTime);
+          setDuration(a.duration);
+        };
+        // @ts-ignore
+        playerRef.current_audio = a; 
+      } catch (e) {
+        console.warn('Media element setup failed:', e);
+      }
+    }
+
     function initPlayer() {
       const el = containerRef.current;
       if (!el) return;
@@ -102,11 +128,17 @@ function useYouTubePlayer() {
       }
       try {
         playerRef.current = new window.YT.Player(el, {
-          height: '2', width: '2',
+          height: '100%', width: '100%',
           playerVars: {
-            autoplay: 0, controls: 0, disablekb: 1, fs: 0,
-            modestbranding: 1, rel: 0, playsinline: 1,
+            autoplay: 0, 
+            controls: 1, // Enable controls for video mode
+            disablekb: 0, 
+            fs: 1,
+            modestbranding: 1, 
+            rel: 0, 
+            playsinline: 1,
             origin: window.location.origin,
+            iv_load_policy: 3
           },
           events: {
             onReady: () => {
@@ -127,19 +159,31 @@ function useYouTubePlayer() {
                 setIsPlaying(true);
                 try { setDuration(playerRef.current.getDuration()); } catch {}
                 startTimerRef.current();
-                if (silentAudioRef.current) silentAudioRef.current.play().catch(() => {});
+                // Always play silent audio when YouTube is playing
+                if (silentAudioRef.current) {
+                  silentAudioRef.current.play().catch(() => {
+                    // Fallback: interaction might be needed
+                  });
+                }
               } else if (e.data === S.PAUSED) {
+                // For background playback, we should NOT pause silent audio
+                // The silent audio should keep playing to maintain audio context
                 setIsPlaying(false);
                 stopTimerRef.current();
-                if (silentAudioRef.current) silentAudioRef.current.pause();
+                // DO NOT pause silent audio - keep it playing for background audio context
+                // This helps prevent browser from suspending audio when tab is in background
               } else if (e.data === S.ENDED) {
                 setIsPlaying(false);
                 stopTimerRef.current();
+                // Only pause silent audio when song actually ends (not when tab switches)
                 if (silentAudioRef.current) silentAudioRef.current.pause();
                 if (onEndRef.current) onEndRef.current();
               } else if (e.data === S.BUFFERING) {
-                // keep isPlaying true while buffering so UI doesn't flicker
                 setIsPlaying(true);
+                // Keep silent audio playing during buffering
+                if (silentAudioRef.current && silentAudioRef.current.paused) {
+                  silentAudioRef.current.play().catch(() => {});
+                }
               }
             },
             onError: (e) => {
@@ -164,21 +208,34 @@ function useYouTubePlayer() {
       }
     }
 
-    return () => stopTimerRef.current();
+    return () => {
+      stopTimerRef.current();
+      // Clean up silent audio element
+      if (silentAudioRef.current) {
+        try {
+          silentAudioRef.current.pause();
+          silentAudioRef.current.src = '';
+          silentAudioRef.current = null;
+        } catch (e) {
+          console.warn('Error cleaning up silent audio:', e);
+        }
+      }
+    };
   }, []);
 
   function isReady() {
     return !!(playerRef.current && typeof playerRef.current.playVideo === 'function');
   }
 
-  async function searchAndPlay(title, artist) {
+  async function searchAndPlay(title, artist, type = 'song') {
     try {
-      const q1 = `${title} ${artist} official audio`;
+      const suffix = type === 'podcast' ? '' : ' official audio';
+      const q1 = `${title} ${artist}${suffix}`.trim();
       const r1 = await fetch(`/api/youtube-search?q=${encodeURIComponent(q1)}`);
       const d1 = await r1.json();
       if (d1.videoId) { playVideoById(d1.videoId); return true; }
 
-      const q2 = `${title} ${artist} song`;
+      const q2 = `${title} ${artist} song`.trim();
       const r2 = await fetch(`/api/youtube-search?q=${encodeURIComponent(q2)}`);
       const d2 = await r2.json();
       if (d2.videoId) { playVideoById(d2.videoId); return true; }
@@ -186,11 +243,24 @@ function useYouTubePlayer() {
     return false;
   }
 
-  function play()  { if (isReady()) { try { playerRef.current.playVideo();  } catch {} } }
-  function pause() { if (isReady()) { try { playerRef.current.pauseVideo(); } catch {} } }
+  function play()  { 
+    const a = playerRef.current_audio;
+    if (a && a.src && a.src !== window.location.href) { a.play().catch(() => {}); return; }
+    if (isReady()) { try { playerRef.current.playVideo();  } catch {} } 
+  }
+  function pause() { 
+    const a = playerRef.current_audio;
+    if (a) a.pause();
+    if (isReady()) { try { playerRef.current.pauseVideo(); } catch {} } 
+  }
 
   function playVideoById(vId) {
     if (!vId) return false;
+    
+    // Stop direct audio if playing
+    const a = playerRef.current_audio;
+    if (a) { a.pause(); a.src = ''; }
+
     if (!isReady()) {
       pendingVideoIdRef.current = vId;
       return false;
@@ -206,10 +276,27 @@ function useYouTubePlayer() {
     }
   }
 
+  function playStream(url) {
+    if (!url) return;
+    pause(); // stop YT
+    const a = playerRef.current_audio;
+    if (a) {
+      a.src = url;
+      a.play().catch(e => {
+        console.warn('Audio play failed, fallback to YT:', e);
+      });
+      setIsPlaying(true);
+    }
+  }
+
   function seekTo(t) {
+    const a = playerRef.current_audio;
+    if (a && a.src && a.src !== window.location.href) { a.currentTime = t; return; }
     if (isReady()) { try { playerRef.current.seekTo(t, true); } catch {} }
   }
   function setVolume(v) {
+    const a = playerRef.current_audio;
+    if (a) a.volume = v / 100;
     if (isReady()) { try { playerRef.current.setVolume(v); } catch {} }
   }
 
@@ -222,8 +309,9 @@ function useYouTubePlayer() {
     containerRef, silentAudioRef,
     ytReady, isPlaying, duration, currentTime,
     loadedVideoIdRef,
-    searchAndPlay, playVideoById, play, pause, seekTo, setVolume,
+    searchAndPlay, playVideoById, playStream, play, pause, seekTo, setVolume,
     onEndRef, updateNativeTime,
+    audioElement: typeof window !== 'undefined' ? playerRef.current_audio : null
   };
 }
 
@@ -243,7 +331,11 @@ function decodeHtml(str) {
     .replace(/&#39;/g, "'")
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>');
+    .replace(/&gt;/g, '>')
+    .replace(/\\u([0-9a-fA-F]{4})/g, (match, grp) => String.fromCharCode(parseInt(grp, 16)))
+    .replace(/&middot;/g, '·')
+    .replace(/&ndash;/g, '–')
+    .replace(/&mdash;/g, '—');
 }
 
 // ─────────────────────── MAIN APP ───────────────────────
@@ -276,6 +368,9 @@ export default function Home() {
   const [fullPlayerOpen, setFullPlayerOpen] = useState(false);
   const [ytResults, setYtResults] = useState([]);
   const [isSearchingYT, setIsSearchingYT] = useState(false);
+  const [podcasts, setPodcasts] = useState([]);
+  const [totalPodcasts, setTotalPodcasts] = useState(0);
+  const [videoEnabled, setVideoEnabled] = useState(false);
   const [visualizer, setVisualizer] = useState('waves'); // waves, bars, pulse
   const [nativeIsPlaying, setNativeIsPlaying] = useState(false);
   const [shuffleEnabled, setShuffleEnabled] = useState(false);
@@ -331,55 +426,127 @@ export default function Home() {
     return { queue, index };
   }
 
-  // ───── Load initial data & cache ─────
+  // ───── Load initial data & cache (Once) ─────
   useEffect(() => {
-    async function initNativeBackground() {
+    const initApp = async () => {
+      // Wake Lock
+      if ('wakeLock' in navigator) {
+        try { await navigator.wakeLock.request('screen'); } catch {}
+      }
+
       if (nativeAndroid) {
         try {
           await LocalNotifications.requestPermissions();
-        } catch(e) { console.error('Failed to request notification permission:', e); }
-      }
-
-      // Request battery optimization exemption for background playback on real devices
-      if (nativeAndroid) {
-        try {
-          const bgMode = await getBackgroundMode();
-          if (bgMode) {
-            await bgMode.disableWebViewOptimizations();
-            const battery = await bgMode.checkBatteryOptimizations();
-            if (!battery.disabled) {
-              await bgMode.requestDisableBatteryOptimizations();
+          const bg = await getBackgroundMode();
+          if (bg) {
+            await bg.enable();
+            if (typeof bg.disableWebViewOptimizations === 'function') {
+              await bg.disableWebViewOptimizations();
+            }
+            if (typeof bg.setDefaults === 'function') {
+              await bg.setDefaults({
+                title: 'Sonix Music',
+                text: 'Running in background',
+                icon: 'icon',
+                color: '7c3aed',
+                resume: true,
+                hidden: false
+              });
             }
           }
-        } catch(e) { console.error('Battery optimization request error:', e); }
+        } catch(e) { console.error('Background init failed:', e); }
+      }
+
+      loadPlaylists();
+      loadSongs(1);
+      backgroundCache();
+
+      try {
+        const saved = localStorage.getItem('sonix_recent');
+        if (saved) setRecentlyPlayed(JSON.parse(saved));
+      } catch {}
+    };
+
+    initApp();
+  }, []);
+
+  // ───── Seamless Audio/Video Engine Switching ─────
+  useEffect(() => {
+    if (!currentSong || isLoadingSong) return;
+    
+    // Determine which engine should be playing
+    const vid = currentSong.videoId;
+    if (!vid) return;
+
+    if (videoEnabled) {
+      // Switched TO Video: If audio engine is playing, transfer to IFrame
+      const a = yt.audioElement;
+      if (a && a.src && a.src !== window.location.href && !a.paused) {
+        const time = a.currentTime;
+        a.pause();
+        a.src = '';
+        yt.playVideoById(vid);
+        // YT load takes a bit, seek after it starts playing via onStateChange or just try now
+        setTimeout(() => yt.seekTo(time), 500);
+      }
+    } else {
+      // Switched TO Audio: If IFrame is playing, transfer to Direct Stream
+      if (yt.isPlaying && !yt.audioElement?.src) {
+        const time = yt.currentTime;
+        yt.pause();
+        fetch(`/api/yt-stream?videoId=${encodeURIComponent(vid)}`)
+          .then(r => r.json())
+          .then(data => {
+            if (data.streamUrl) {
+              yt.playStream(data.streamUrl);
+              setTimeout(() => yt.seekTo(time), 100);
+            }
+          });
       }
     }
-    initNativeBackground();
+  }, [videoEnabled]);
 
-    const onVisibilityChange = async () => {
-      // Only pause on mobile web when switching apps — desktop should keep playing
-      // when Chrome is minimized or another window is focused
-      if (document.hidden && !nativeAndroid) {
-        const isMobileWeb = /Mobi|Android/i.test(navigator.userAgent) && !Capacitor.isNativePlatform();
-        if (isMobileWeb) yt.pause();
+  // ───── Playback watchdog (keep background playing) ─────
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (!document.hidden && (optimisticPlaying || yt.isPlaying)) {
+        // Tab came to foreground - ensure engines are active
+        yt.play();
+        if (yt.silentAudioRef.current && yt.silentAudioRef.current.paused) {
+          yt.silentAudioRef.current.play().catch(() => {});
+        }
       }
     };
+    
+    document.addEventListener('visibilitychange', handleVisibility);
+    
+    const watchdog = setInterval(() => {
+      // Logic for background persistence
+      const shouldBePlaying = nativeAndroid ? (nativeIsPlaying || optimisticPlaying) : optimisticPlaying;
+      const isActuallyPlaying = nativeAndroid ? nativeIsPlaying : yt.isPlaying;
+      
+      if (shouldBePlaying) {
+        // 1. Ensure silent track is ALWAYS playing as an anchor
+        if (yt.silentAudioRef.current && yt.silentAudioRef.current.paused) {
+          yt.silentAudioRef.current.play().catch(() => {});
+        }
 
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    loadPlaylists();
-    loadSongs(1);
-    backgroundCache();
-
-    // Restore recently played from localStorage first (instant)
-    try {
-      const saved = localStorage.getItem('sonix_recent');
-      if (saved) setRecentlyPlayed(JSON.parse(saved));
-    } catch {}
+        // 2. Re-poke main engine if it dropped
+        if (!isActuallyPlaying && currentSong) {
+          if (nativeAndroid) {
+            NativeMusicPlayer.resume().catch(() => {}); 
+          } else {
+            yt.play();
+          }
+        }
+      }
+    }, 2000);
 
     return () => {
-      document.removeEventListener('visibilitychange', onVisibilityChange);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      clearInterval(watchdog);
     };
-  }, []);
+  }, [currentSong, nativeIsPlaying, optimisticPlaying, yt.isPlaying]);
 
   // When user logs in OR cachedSongs loads, sync recently played from server
   useEffect(() => {
@@ -487,7 +654,7 @@ export default function Home() {
   async function searchYouTubeFallback(query, multi = false) {
     const endpoints = [
       `/api/youtube-search?q=${encodeURIComponent(query)}${multi ? '&multi=true' : ''}`,
-      `https://sonix-music.vercel.app/api/youtube-search?q=${encodeURIComponent(query)}${multi ? '&multi=true' : ''}`,
+      `/api/youtube-search?q=${encodeURIComponent(query)}&type=video${multi ? '&multi=true' : ''}`,
     ];
     return fetchJsonWithFallback(endpoints);
   }
@@ -622,30 +789,59 @@ export default function Home() {
     setLoading(false);
   }
 
+  async function loadPodcasts(p, options = {}) {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({
+        page: p, limit: 50,
+        ...(options.search && { search: options.search }),
+      });
+      const res = await fetch(`/api/podcasts?${params}`);
+      const data = await res.json();
+      if (p === 1) { setPodcasts(data.podcasts || []); }
+      else { setPodcasts(prev => [...prev, ...(data.podcasts || [])]); }
+      setTotalPodcasts(data.total || 0);
+      setPage(p);
+    } catch (e) { console.error('Failed to load podcasts', e); }
+    setLoading(false);
+  }
+
   function songKey(song) {
     return song.songId || song._id || song.videoId || `${song.title || ''}::${song.artist || ''}`;
   }
 
   async function resolveSongVideoId(song) {
     if (!song) return null;
+    const key = songKey(song);
+
     if (song.videoId) {
-      videoIdCacheRef.current.set(songKey(song), song.videoId);
+      videoIdCacheRef.current.set(key, song.videoId);
       return song.videoId;
     }
 
-    const key = songKey(song);
     const cachedVideoId = videoIdCacheRef.current.get(key);
-    if (cachedVideoId) return cachedVideoId;
+    if (cachedVideoId && typeof cachedVideoId === 'string') return cachedVideoId;
+
+    // Check localStorage cache for cross-session persistence
+    try {
+      const persisted = localStorage.getItem(`yt_vid_${key}`);
+      if (persisted) {
+        videoIdCacheRef.current.set(key, persisted);
+        return persisted;
+      }
+    } catch {}
 
     if (pendingVideoIdRef.current.has(key)) {
       return pendingVideoIdRef.current.get(key);
     }
 
-    const query = `${song.title || ''} ${song.artist || ''} official audio`.trim();
+    const suffix = song.type === 'podcast' || song.source === 'podcast' ? '' : ' official audio';
+    const query = `${song.title || ''} ${song.artist || ''}${suffix}`.trim();
     const task = searchYouTubeFallback(query)
       .then(data => {
         if (data?.videoId) {
           videoIdCacheRef.current.set(key, data.videoId);
+          try { localStorage.setItem(`yt_vid_${key}`, data.videoId); } catch {}
           return data.videoId;
         }
         return null;
@@ -726,7 +922,7 @@ export default function Home() {
       ).slice(0, 30);
       setSearchResults(localHits);
 
-      // DB + YT in parallel
+      // DB + YT + Podcasts in parallel
       const dbPromise = fetch(`/api/search?q=${encodeURIComponent(q)}`)
         .then(r => r.json())
         .catch(() => null);
@@ -734,6 +930,10 @@ export default function Home() {
       const ytPromise = searchYouTubeFallback(q, true)
         .then(d => Array.isArray(d) ? d : (d?.results || []))
         .catch(() => []);
+
+      const podcastPromise = fetch(`/api/podcasts?search=${encodeURIComponent(q)}`)
+        .then(r => r.json())
+        .catch(() => ({ podcasts: [] }));
 
       // DB results
       dbPromise.then(data => {
@@ -745,6 +945,11 @@ export default function Home() {
           ytResultsCacheRef.current.set(qKey, data.ytResults);
           setIsSearchingYT(false);
         }
+      }).catch(() => {});
+
+      // Podcast results
+      podcastPromise.then(data => {
+        if (data.podcasts?.length) setPodcasts(data.podcasts);
       }).catch(() => {});
 
       // YT results — update when they arrive, retry once if empty
@@ -767,7 +972,7 @@ export default function Home() {
         }
       }).catch(() => setIsSearchingYT(false));
 
-      await Promise.allSettled([dbPromise, ytPromise]);
+      await Promise.allSettled([dbPromise, ytPromise, podcastPromise]);
       setIsSearching(false);
     }, 350);
   }, [search, cachedSongs]);
@@ -897,7 +1102,8 @@ export default function Home() {
           if (!streamUrl) {
             // Resolve videoId if we don't have one yet
             if (!videoId) {
-              const query = `${song.title || ''} ${song.artist || ''} official audio`.trim();
+              const suffix = song.type === 'podcast' || song.source === 'podcast' ? '' : ' official audio';
+              const query = `${song.title || ''} ${song.artist || ''}${suffix}`.trim();
               try {
                 const res = await fetch(`/api/youtube-search?q=${encodeURIComponent(query)}`);
                 const data = await res.json();
@@ -926,21 +1132,41 @@ export default function Home() {
           }
 
           if (streamUrl) {
-            const artwork = song.thumbnail || song.image ||
-              (videoId ? `https://img.youtube.com/vi/${videoId}/mqdefault.jpg` : '');
+            const artwork = song.thumbnail || song.image || 'https://picsum.photos/seed/sonixart/200';
             const songWithUrl = { ...song, url: streamUrl, videoId: videoId || song.videoId };
             const queueSource = songList || queueRef.current || [];
 
-            yt.pause();
-            await NativeMusicPlayer.playQueue({
-              queue: [{
+            // Build the full queue for Android with stream URLs
+            const androidQueue = queueSource.map(s => {
+              // For each song in the queue, we need to get its stream URL
+              // For now, we'll use the current song's stream URL and placeholder URLs for others
+              // The web side will handle actual queue navigation via handleNext/handlePrev
+              const itemArtwork = s.thumbnail || s.image ||
+                (s.videoId ? `https://img.youtube.com/vi/${s.videoId}/mqdefault.jpg` : '');
+              return {
+                url: songKey(s) === key ? streamUrl : '', // Only current song has real URL
+                title: s.title || 'Unknown Track',
+                artist: s.artist || 'Unknown Artist',
+                album: s.album || 'Sonix Music',
+                artwork: itemArtwork,
+              };
+            });
+
+            // If queue is empty, create a single-item queue
+            if (androidQueue.length === 0) {
+              androidQueue.push({
                 url: streamUrl,
                 title: song.title || 'Unknown Track',
                 artist: song.artist || 'Unknown Artist',
                 album: song.album || 'Sonix Music',
                 artwork,
-              }],
-              index: 0,
+              });
+            }
+
+            yt.pause();
+            await NativeMusicPlayer.playQueue({
+              queue: androidQueue,
+              index: Math.max(0, queueSource.findIndex(s => songKey(s) === key)),
               shuffle: shuffleEnabled,
               repeatMode,
             });
@@ -977,23 +1203,42 @@ export default function Home() {
 
       // Web path (browser / non-Android)
       const resolvedVideoId = await resolveSongVideoId(song);
-      const playableSong = resolvedVideoId && !song.videoId
-        ? { ...song, videoId: resolvedVideoId }
-        : song;
+      const playableSong = (resolvedVideoId && !song.videoId) ? { ...song, videoId: resolvedVideoId } : song;
 
       setCurrentSong(playableSong);
       setNativeIsPlaying(false);
+      
+      // If NOT in video mode, attempt to play direct audio stream to bypass YT background restrictions
+      if (!videoEnabled && (resolvedVideoId || song.videoId)) {
+        try {
+          const vid = resolvedVideoId || song.videoId;
+          const res = await fetch(`/api/yt-stream?videoId=${encodeURIComponent(vid)}`);
+          if (res.ok) {
+            const data = await res.json();
+            if (data.streamUrl) {
+              yt.playStream(data.streamUrl);
+              isLoadingSongRef.current = false;
+              setIsLoadingSong(false);
+              setLoadingSongKey(null);
+            } else {
+              yt.playVideoById(vid);
+            }
+          } else {
+            // Server error or 404 (stream not found) -> Fallback to Iframe
+            yt.playVideoById(vid);
+          }
+        } catch (e) {
+          yt.playVideoById(resolvedVideoId || song.videoId);
+        }
+      } else if (resolvedVideoId) {
+        yt.playVideoById(resolvedVideoId);
+      } else {
+        yt.searchAndPlay(song.title || '', song.artist || '');
+      }
+
       isLoadingSongRef.current = false;
       setIsLoadingSong(false);
       setLoadingSongKey(null);
-
-      // Play via YT player — playVideoById handles pending if not ready yet
-      if (resolvedVideoId) {
-        yt.playVideoById(resolvedVideoId);
-      } else {
-        // No videoId at all — search by title/artist
-        yt.searchAndPlay(song.title || '', song.artist || '');
-      }
 
       // Track recently played (local + persisted)
       setRecentlyPlayed(prev => {
@@ -1019,20 +1264,20 @@ export default function Home() {
       if ('mediaSession' in navigator) {
         const artwork = playableSong.thumbnail ||
           playableSong.image ||
-          (playableSong.videoId ? `https://img.youtube.com/vi/${playableSong.videoId}/hqdefault.jpg` : '');
+          (playableSong.videoId ? `https://img.youtube.com/vi/${playableSong.videoId}/hqdefault.jpg` : 'https://picsum.photos/seed/sonix/200');
 
         navigator.mediaSession.metadata = new MediaMetadata({
           title: playableSong.title || 'Unknown Track',
           artist: playableSong.artist || 'Unknown Artist',
           album: playableSong.album || 'Sonix Music',
-          artwork: artwork ? [
+          artwork: [
             { src: artwork.replace('mqdefault', 'hqdefault').replace('sddefault', 'hqdefault'), sizes: '480x360', type: 'image/jpeg' },
             { src: artwork, sizes: '320x180', type: 'image/jpeg' },
-          ] : [],
+          ],
         });
         navigator.mediaSession.playbackState = 'playing';
-        navigator.mediaSession.setActionHandler('play', () => yt.play());
-        navigator.mediaSession.setActionHandler('pause', () => yt.pause());
+        navigator.mediaSession.setActionHandler('play', () => handlePlayPauseToggle());
+        navigator.mediaSession.setActionHandler('pause', () => handlePlayPauseToggle());
         navigator.mediaSession.setActionHandler('previoustrack', () => handlePrev());
         navigator.mediaSession.setActionHandler('nexttrack', () => handleNext());
         navigator.mediaSession.setActionHandler('seekto', (d) => { if (d.seekTime != null) handleSeek(d.seekTime); });
@@ -1231,7 +1476,7 @@ export default function Home() {
         }
       } else {
         // DB song with no videoId cached — search YT
-        yt.searchAndPlay(currentSong.title, currentSong.artist);
+        yt.searchAndPlay(currentSong.title, currentSong.artist, currentSong.type || 'song');
       }
     }
   }
@@ -1319,7 +1564,10 @@ export default function Home() {
     }
   };
 
-  function loadMore() { loadSongs(page + 1, { search, genre, source }); }
+  function loadMore() { 
+    if (view === 'podcasts') loadPodcasts(page + 1, { search });
+    else loadSongs(page + 1, { search, genre, source }); 
+  }
 
   const displaySongs = search.trim() ? searchResults : songs;
   // For liked view: match from cachedSongs first, then fill in any YT/unknown songs from likedSongObjects
@@ -1357,84 +1605,61 @@ export default function Home() {
 
       {/* Sidebar */}
       <aside className={`sidebar ${mobileMenuOpen ? 'open' : ''}`}>
-        <div className="sidebar-logo">
-          <h1 className="sidebar-brand">
-            SONIX MUSIC <span className="sidebar-brand-tag">-TJ</span>
-          </h1>
-          <button
-            className="sidebar-close-btn"
-            onClick={() => setMobileMenuOpen(false)}
-            aria-label="Close menu"
-          >
-            ✕
-          </button>
+        <div className="sidebar-logo" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <h1 className="sidebar-brand">SONIX MUSIC</h1>
+          <button className="sidebar-close-btn" onClick={() => setMobileMenuOpen(false)} style={{ display: mobileMenuOpen ? 'flex' : 'none', background: 'rgba(255,255,255,0.1)', border: 'none', color: '#fff', padding: '6px', borderRadius: '8px' }}>✕</button>
         </div>
+        
         <nav className="sidebar-nav">
           <div className="nav-section-title">Menu</div>
           <button className={`nav-item ${view === 'home' && !genre ? 'active' : ''}`} onClick={() => { setView('home'); setGenre(''); loadSongs(1); setMobileMenuOpen(false); }}>
             <span className="icon">🏠</span> Home
           </button>
           <button className={`nav-item ${view === 'search' ? 'active' : ''}`} onClick={() => { setView('search'); setMobileMenuOpen(false); }}>
-            <span className="icon">🔍</span> Search
+            <span className="icon">🔍</span> Explore
+          </button>
+          <button className={`nav-item ${view === 'podcasts' ? 'active' : ''}`} onClick={() => { setView('podcasts'); loadPodcasts(1); setMobileMenuOpen(false); }}>
+            <span className="icon">🎙️</span> Podcasts
           </button>
 
           <div className="nav-section-title">Your Library</div>
-          <button className={`nav-item ${view === 'home' && !genre ? 'active' : ''}`} onClick={() => { setView('home'); setGenre(''); loadSongs(1); setMobileMenuOpen(false); }}>
-            <span className="icon">🎶</span> All Songs
+          <button className={`nav-item ${view === 'liked' ? 'active' : ''}`} onClick={() => { setView('liked'); setMobileMenuOpen(false); }}>
+            <span className="icon">💚</span> Liked Songs
+          </button>
+          <button className={`nav-item ${view === 'recent' ? 'active' : ''}`} onClick={() => { setView('recent'); setMobileMenuOpen(false); }}>
+            <span className="icon">🕐</span> Recently Played
           </button>
 
-          {user ? (
+          {user && (
             <>
-              <button className={`nav-item ${view === 'liked' ? 'active' : ''}`} onClick={() => { setView('liked'); setMobileMenuOpen(false); }}>
-                <span className="icon">💚</span> Liked Songs
-                {likedSongs.size > 0 && <span style={{ marginLeft: 'auto', fontSize: 11, color: '#6b7280' }}>{likedSongs.size}</span>}
-              </button>
-              <button className={`nav-item ${view === 'recent' ? 'active' : ''}`} onClick={() => { setView('recent'); setMobileMenuOpen(false); }}>
-                <span className="icon">🕐</span> Recently Played
-                {recentlyPlayed.length > 0 && <span style={{ marginLeft: 'auto', fontSize: 11, color: '#6b7280' }}>{recentlyPlayed.length}</span>}
-              </button>
-
-              {userPlaylists.length > 0 && (
-                <>
-                  <div className="nav-section-title">My Playlists</div>
-                  {userPlaylists.map((pl) => (
-                    <button key={pl._id} className={`nav-item ${activePlaylist?._id === pl._id ? 'active' : ''}`}
-                      onClick={() => openUserPlaylist(pl)}>
-                      <span className="icon">🎵</span> {pl.name}
-                      <span style={{ marginLeft: 'auto', fontSize: 11, color: '#6b7280' }}>{pl.songs?.length || 0}</span>
-                    </button>
-                  ))}
-                </>
-              )}
+              <div className="nav-section-title">Collections</div>
+              {userPlaylists.map((pl) => (
+                <button key={pl._id} className={`nav-item ${activePlaylist?._id === pl._id ? 'active' : ''}`} onClick={() => openUserPlaylist(pl)}>
+                  <span className="icon">📁</span> {pl.name}
+                </button>
+              ))}
             </>
-          ) : (
-            <button className="nav-item" style={{ color: '#7c3aed', fontWeight: 600 }} onClick={() => { setShowAuthModal(true); setMobileMenuOpen(false); }}>
-              <span className="icon">🔐</span> Log In to see your library
-            </button>
           )}
 
-          <div className="nav-section-title">Browse</div>
-          {playlists.map((pl, i) => (
+          <div className="nav-section-title">Browse Genres</div>
+          {playlists.slice(0, 6).map((pl, i) => (
             <button key={i} className={`nav-item ${activePlaylist?.name === pl.name ? 'active' : ''}`} onClick={() => openPlaylist(pl)}>
-              <span className="icon">{pl.name.split(' ')[0]}</span> {pl.name.slice(pl.name.indexOf(' ') + 1)}
+              <span className="icon">🎧</span> {pl.name.replace(' Hits', '')}
             </button>
           ))}
-
-          {/* Account */}
-          <div className="nav-section-title">Account</div>
-          {user ? (
-            <>
-              <div style={{ padding: '6px 16px 2px', color: '#9ca3af', fontSize: 12 }}>👤 {user.name}</div>
-              <button className="nav-item" onClick={() => { logout(); setMobileMenuOpen(false); }}>
-                <span className="icon">🚪</span> Log Out
+          
+          <div style={{ marginTop: 'auto', padding: '20px 10px' }}>
+            {user ? (
+              <button className="nav-item" style={{ background: 'rgba(255,255,255,0.05)' }} onClick={logout}>
+                <span className="icon">👤</span> {user.name.split(' ')[0]} (Logout)
               </button>
-            </>
-          ) : (
-            <button className="nav-item" onClick={() => { setShowAuthModal(true); setMobileMenuOpen(false); }}>
-              <span className="icon">🔐</span> Log In / Sign Up
-            </button>
-          )}
-
+            ) : (
+              <button className="nav-item active" onClick={() => setShowAuthModal(true)}>
+                <span className="icon">🔐</span> Sign In / Join
+              </button>
+            )}
+          </div>
+          
           <div className="sidebar-bottom-space" aria-hidden="true"></div>
 
           {/* Hidden File Input */}
@@ -1496,6 +1721,7 @@ export default function Home() {
             <button
               className={`voice-search-btn ${isListening ? 'listening' : ''}`}
               onClick={startVoiceSearch}
+              style={{ padding: '8px', marginLeft: 'auto', background: isListening ? 'rgba(124, 58, 237, 0.2)' : 'transparent', border: 'none', borderRadius: '50%', color: isListening ? '#7c3aed' : '#9ca3af', cursor: 'pointer', transition: 'all 0.3s' }}
               title={isListening ? 'Stop listening' : 'Voice search'}
               aria-label="Voice search"
             >
@@ -1506,36 +1732,86 @@ export default function Home() {
 
         <div className="content-scroll">
           {view === 'home' && !search.trim() && (
-            <>
-              {playlists.length > 0 && (
-                <>
-                  <div className="section-header fade-in"><h2>Featured Playlists</h2></div>
-                  <div className="playlist-row fade-in">
-                    {playlists.map((pl, i) => (
-                      <div key={i} className="playlist-card" onClick={() => openPlaylist(pl)}>
-                        <div className="card-bg" style={{ background: pl.cover ? `url(${pl.cover}) center/cover` : pl.gradient }}>
-                          <div className="play-overlay">▶</div>
-                          <div className="card-info">
-                            <div className="card-name">{pl.name}</div>
-                            <div className="card-desc">{pl.description}</div>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
+            <div className="fade-in">
+              <div className="premium-hero">
+                <img 
+                  src={(songs[0]?.image || songs[0]?.thumbnail || 'https://picsum.photos/seed/trending/800/400').replace('mqdefault', 'hqdefault')} 
+                  className="hero-bg-img" 
+                  alt="" 
+                />
+                <div className="hero-overlay"></div>
+                <div className="hero-content">
+                  <span className="hero-tag">TRENDING NOW</span>
+                  <h1 className="hero-title">{decodeHtml(songs[0]?.title) || 'Sonix Music Premium'}</h1>
+                  <p style={{ color: 'rgba(255,255,255,0.7)', marginBottom: 24, fontSize: 18, fontWeight: 500 }}>
+                    Experience {decodeHtml(songs[0]?.artist) || 'the latest chart-toppers'} and more trending hits in high-fidelity.
+                  </p>
+                  <button className="hero-btn" onClick={() => songs[0] && playSongDirect(songs[0], songs)}>
+                    Listen Now
+                  </button>
+                </div>
+              </div>
 
-              <div className="section-header fade-in">
-                <h2>{genre ? `${genre} Songs` : 'All Songs'}</h2>
+              {/* Trending Row */}
+              <div className="section-header">
+                <h2>Trending This Week</h2>
+                <button className="view-all">View All</button>
+              </div>
+              <div className="horizontal-scroll">
+                {songs.slice(0, 10).map((s, i) => (
+                  <div key={i} className="premium-card" onClick={() => playSongDirect(s, songs)}>
+                    <div className="card-img-wrap">
+                      <img src={s.thumbnail || s.image || 'https://picsum.photos/seed/sonix/200'} style={{ width: '100%', height: '100%', objectFit: 'cover' }} alt="" />
+                      <div className="card-play-btn">▶</div>
+                    </div>
+                    <div className="card-title">{decodeHtml(s.title)}</div>
+                    <div className="card-subtitle">{decodeHtml(s.artist)}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* New Releases Row */}
+              <div className="section-header">
+                <h2>New Releases</h2>
+                <button className="view-all">Browse</button>
+              </div>
+              <div className="horizontal-scroll">
+                {songs.slice(10, 20).map((s, i) => (
+                  <div key={i} className="premium-card" onClick={() => playSongDirect(s, songs)}>
+                    <div className="card-img-wrap">
+                      <img src={s.thumbnail || s.image || 'https://picsum.photos/seed/sonix2/200'} style={{ width: '100%', height: '100%', objectFit: 'cover' }} alt="" />
+                      <div className="card-play-btn">▶</div>
+                    </div>
+                    <div className="card-title">{decodeHtml(s.title)}</div>
+                    <div className="card-subtitle">{decodeHtml(s.artist)}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Top Artists (Circular) */}
+              <div className="section-header">
+                <h2>Top Singers</h2>
+              </div>
+              <div className="horizontal-scroll" style={{ paddingBottom: 50 }}>
+                {Array.from(new Set(songs.map(s => s.artist))).slice(0, 8).map((artist, i) => (
+                  <div key={i} className="artist-card" onClick={() => { setSearch(artist); setView('search'); }}>
+                    <img src={`https://picsum.photos/seed/${artist}/200`} className="artist-img" alt="" />
+                    <div className="artist-name">{decodeHtml(artist)}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Standard List Title below */}
+              <div className="section-header">
+                <h2>Browse All Tracks</h2>
                 <span style={{ color: '#9ca3af', fontSize: '13px' }}>{totalSongs.toLocaleString()} tracks</span>
               </div>
-              <div className="filter-pills fade-in">
-                <button className={`pill ${source === 'all' ? 'active' : ''}`} onClick={() => filterSource('all')}>All</button>
-                <button className={`pill ${source === 'jiosaavn' ? 'active' : ''}`} onClick={() => filterSource('jiosaavn')}>JioSaavn</button>
-                <button className={`pill ${source === 'spotify' ? 'active' : ''}`} onClick={() => filterSource('spotify')}>Spotify</button>
+              <div className="filter-pills fade-in" style={{ marginBottom: 20 }}>
+                <button className={`pill ${source === 'all' ? 'active' : ''}`} onClick={() => filterSource('all')}>All Sources</button>
+                <button className={`pill ${source === 'jiosaavn' ? 'active' : ''}`} onClick={() => filterSource('jiosaavn')}>Indian Hits</button>
+                <button className={`pill ${source === 'spotify' ? 'active' : ''}`} onClick={() => filterSource('spotify')}>Spotify Global</button>
               </div>
-            </>
+            </div>
           )}
 
           {view === 'playlist' && activePlaylist && !search.trim() && (
@@ -1578,6 +1854,16 @@ export default function Home() {
             </div>
           )}
 
+          {view === 'podcasts' && !search.trim() && (
+            <div className="section-header fade-in">
+              <div>
+                <h2>🎙️ Podcasts</h2>
+                <p style={{ color: '#9ca3af', fontSize: '13px', marginTop: '4px' }}>{totalPodcasts.toLocaleString()} shows</p>
+              </div>
+              <button className="view-all" onClick={() => { setView('home'); loadSongs(1); }}>← Back</button>
+            </div>
+          )}
+
           {(view === 'search' || search.trim()) && (
             <div className="section-header fade-in">
               <h2>{search.trim() ? `Results for "${search}"` : 'Search'}</h2>
@@ -1586,7 +1872,7 @@ export default function Home() {
           )}
 
           <div className="song-list">
-            {activeSongs.map((song, i) => {
+            {(view === 'podcasts' ? podcasts : activeSongs).map((song, i) => {
               const key = song.songId || song._id || song.videoId || `${song.title || ''}::${song.artist || ''}`;
               const isLiked = likedSongs.has(key);
               const isCurrentSong = currentSong && songKey(currentSong) === key;
@@ -1606,11 +1892,13 @@ export default function Home() {
                     </span>
                   ) : i + 1}
                 </span>
-                {song.image ? (
-                  <img className="song-img" src={song.image} alt="" loading="lazy" onError={(e) => { e.target.style.display = 'none'; }} />
-                ) : (
-                  <div className="song-img" style={{ background: 'var(--gradient-1)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '18px' }}>🎵</div>
-                )}
+                <img 
+                  className="song-img" 
+                  src={song.thumbnail || song.image || 'https://picsum.photos/seed/sonixart/200'} 
+                  alt="" 
+                  loading="lazy" 
+                  onError={(e) => { e.target.src = 'https://picsum.photos/seed/sonix/200'; }} 
+                />
                 <div className="song-details">
                   <div className="song-title">{decodeHtml(song.title)}</div>
                   <div className="song-artist">{decodeHtml(song.artist)}</div>
@@ -1643,7 +1931,10 @@ export default function Home() {
 
           {loading && <div className="spinner"></div>}
 
-          {!loading && !search.trim() && displaySongs.length > 0 && displaySongs.length < totalSongs && (
+          {!loading && !search.trim() && (
+            (view === 'podcasts' ? podcasts : displaySongs).length > 0 && 
+            (view === 'podcasts' ? podcasts : displaySongs).length < (view === 'podcasts' ? totalPodcasts : totalSongs)
+          ) && (
             <div style={{ textAlign: 'center', padding: '24px' }}>
               <button className="pill" onClick={loadMore} style={{ padding: '10px 32px' }}>Load More</button>
             </div>
@@ -1750,11 +2041,11 @@ export default function Home() {
         {currentSong ? (
           <>
             <div className="player-song-info">
-              {currentSong.image ? (
-                <img src={currentSong.image} alt="" />
-              ) : (
-                <div style={{ width: 56, height: 56, borderRadius: 8, background: 'var(--gradient-1)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '24px', flexShrink: 0 }}>🎵</div>
-              )}
+              <img 
+                src={currentSong.thumbnail || currentSong.image || 'https://picsum.photos/seed/sonixart/200'} 
+                alt="" 
+                onError={(e) => { e.target.src = 'https://picsum.photos/seed/sonix/200'; }}
+              />
               <div className="info">
                 <div className="title">{decodeHtml(currentSong.title)}</div>
                 <div className="artist">{decodeHtml(currentSong.artist)}</div>
@@ -1783,6 +2074,20 @@ export default function Home() {
             </div>
 
             <div className="player-extra">
+              <div className="mode-toggle">
+                <button 
+                  className={`mode-btn ${!videoEnabled ? 'active' : ''}`} 
+                  onClick={(e) => { e.stopPropagation(); setVideoEnabled(false); }}
+                >
+                  AUDIO
+                </button>
+                <button 
+                  className={`mode-btn ${videoEnabled ? 'active' : ''}`} 
+                  onClick={(e) => { e.stopPropagation(); setVideoEnabled(true); }}
+                >
+                  VIDEO
+                </button>
+              </div>
               <div className="volume-control">
                 <button onClick={(e) => { e.stopPropagation(); handleVolume(volume > 0 ? 0 : 80); }}>
                   {volume === 0 ? '🔇' : volume < 50 ? '🔉' : '🔊'}
@@ -1825,25 +2130,39 @@ export default function Home() {
             {/* Header */}
             <div className="sp-header">
               <button className="sp-down-btn" onClick={() => setFullPlayerOpen(false)}>▼</button>
-              <span className="sp-header-label">Now Playing</span>
+              <div className="sp-mode-switch">
+                <button className={!videoEnabled ? 'active' : ''} onClick={() => setVideoEnabled(false)}>Audio</button>
+                <button className={videoEnabled ? 'active' : ''} onClick={() => setVideoEnabled(true)}>Video</button>
+              </div>
               <span style={{ width: 36 }} />
             </div>
 
             {/* Disc artwork */}
             <div
-              className="sp-disc-wrap"
+              className={`sp-disc-wrap ${videoEnabled ? 'is-video' : ''}`}
               onTouchStart={handleTouchStart}
               onTouchEnd={handleTouchEnd}
             >
-              <div className="sp-disc">
-                <div className="sp-disc-ring" />
-                {currentSong.image ? (
-                  <img src={currentSong.image} className={`sp-disc-img ${activePlaying ? 'spin' : ''}`} alt="" />
-                ) : (
-                  <div className="sp-disc-img sp-disc-placeholder">🎵</div>
-                )}
-                <div className="sp-disc-center" />
-              </div>
+              {videoEnabled ? (
+                <div className="sp-video-container">
+                  <div id="full-player-video-box" />
+                </div>
+              ) : (
+                <div className="sp-disc">
+                  <div className="sp-disc-ring" />
+                  {currentSong.image ? (
+                    <img 
+                      src={currentSong.image} 
+                      className={`sp-disc-img ${activePlaying ? 'spin' : ''}`} 
+                      alt="" 
+                      onError={(e) => { e.target.src = 'https://picsum.photos/seed/sonix/400'; }}
+                    />
+                  ) : (
+                    <div className="sp-disc-img sp-disc-placeholder">🎵</div>
+                  )}
+                  <div className="sp-disc-center" />
+                </div>
+              )}
             </div>
 
             {/* Song info + like */}
@@ -1897,10 +2216,11 @@ export default function Home() {
       </div>
       {/* Hidden YouTube player mount point — ref-based, no ID conflict */}
       <div
-        ref={yt.containerRef}
-        style={{ position: 'fixed', bottom: 0, left: 0, width: '2px', height: '2px', opacity: 0, pointerEvents: 'none', zIndex: -1 }}
-        aria-hidden="true"
-      />
+        className={`yt-video-container ${videoEnabled ? 'visible' : ''} ${fullPlayerOpen ? 'in-full' : ''}`}
+        aria-hidden={!videoEnabled}
+      >
+        <div ref={yt.containerRef} style={{ width: '100%', height: '100%' }} id="yt-player-placeholder" />
+      </div>
       {/* Silent audio element — anchors Android mediaSession so notification panel appears */}
       <audio
         ref={yt.silentAudioRef}

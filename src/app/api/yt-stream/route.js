@@ -17,6 +17,18 @@ const INVIDIOUS = [
   'https://invidious.fdn.fr',
   'https://invidious.lunar.icu',
   'https://invidious.reallyaweso.me',
+  'https://invidious.snopyta.org',
+  'https://invidious.weblibre.org',
+  'https://invidious.tiekoetter.com',
+  'https://invidious.0011.lt',
+  'https://invidious.ggc-project.de',
+  'https://invidious.hub.ne.kr',
+  'https://invidious.private.coffee',
+  'https://invidious.esmailelbob.xyz',
+  'https://invidious.projectsegfau.lt',
+  'https://yewtu.be',
+  'https://inv.tux.pizza',
+  'https://invidious.flokinet.to',
 ];
 
 const PIPED = [
@@ -27,6 +39,11 @@ const PIPED = [
   'https://api.piped.yt',
   'https://pipedapi.r4fo.com',
   'https://pipedapi.leptons.xyz',
+  'https://pipedapi.moomoo.me',
+  'https://pipedapi.syncpundit.io',
+  'https://pipedapi.qdi.fi',
+  'https://pipedapi.drgns.space',
+  'https://pipedapi.astartes.nl',
 ];
 
 // Server-side stream cache: videoId → { url, ts }
