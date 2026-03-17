@@ -40,6 +40,25 @@ public class MusicPlayerPlugin extends Plugin {
         }
     }
 
+    /**
+     * Called by the web layer when a YouTube song starts playing.
+     * Updates the notification with title/artist and puts the service
+     * into "YouTube mode" so notification buttons relay to the web.
+     */
+    @PluginMethod
+    public void updateMeta(PluginCall call) {
+        String title   = call.getString("title",   "Sonix Music");
+        String artist  = call.getString("artist",  "Playing...");
+        boolean playing = Boolean.TRUE.equals(call.getBoolean("isPlaying", true));
+
+        Intent intent = baseIntent(MusicPlaybackService.ACTION_UPDATE_META);
+        intent.putExtra("title",     title);
+        intent.putExtra("artist",    artist);
+        intent.putExtra("isPlaying", playing);
+        getContext().startService(intent);
+        call.resolve();
+    }
+
     @PluginMethod
     public void play(PluginCall call) {
         String url = call.getString("url", "");

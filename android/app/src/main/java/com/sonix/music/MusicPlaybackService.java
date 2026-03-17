@@ -27,83 +27,105 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class MusicPlaybackService extends MediaSessionService {
-    public static final String ACTION_PLAY_SINGLE = "com.sonix.music.action.PLAY_SINGLE";
-    public static final String ACTION_PLAY_QUEUE = "com.sonix.music.action.PLAY_QUEUE";
-    public static final String ACTION_PAUSE = "com.sonix.music.action.PAUSE";
-    public static final String ACTION_RESUME = "com.sonix.music.action.RESUME";
-    public static final String ACTION_STOP = "com.sonix.music.action.STOP";
-    public static final String ACTION_NEXT = "com.sonix.music.action.NEXT";
-    public static final String ACTION_PREVIOUS = "com.sonix.music.action.PREVIOUS";
-    public static final String ACTION_SEEK = "com.sonix.music.action.SEEK";
-    public static final String ACTION_SET_SHUFFLE = "com.sonix.music.action.SET_SHUFFLE";
-    public static final String ACTION_SET_REPEAT = "com.sonix.music.action.SET_REPEAT";
-    public static final String ACTION_TOGGLE_PAUSE = "com.sonix.music.action.TOGGLE_PAUSE";
+    public static final String ACTION_PLAY_SINGLE   = "com.sonix.music.action.PLAY_SINGLE";
+    public static final String ACTION_PLAY_QUEUE    = "com.sonix.music.action.PLAY_QUEUE";
+    public static final String ACTION_PAUSE         = "com.sonix.music.action.PAUSE";
+    public static final String ACTION_RESUME        = "com.sonix.music.action.RESUME";
+    public static final String ACTION_STOP          = "com.sonix.music.action.STOP";
+    public static final String ACTION_NEXT          = "com.sonix.music.action.NEXT";
+    public static final String ACTION_PREVIOUS      = "com.sonix.music.action.PREVIOUS";
+    public static final String ACTION_SEEK          = "com.sonix.music.action.SEEK";
+    public static final String ACTION_SET_SHUFFLE   = "com.sonix.music.action.SET_SHUFFLE";
+    public static final String ACTION_SET_REPEAT    = "com.sonix.music.action.SET_REPEAT";
+    public static final String ACTION_TOGGLE_PAUSE  = "com.sonix.music.action.TOGGLE_PAUSE";
 
-    private static final String CHANNEL_ID = "sonix_music_playback";
-    private static final int NOTIFICATION_ID = 1001;
+    // Sent from web to update the notification metadata for YT songs
+    public static final String ACTION_UPDATE_META   = "com.sonix.music.action.UPDATE_META";
 
-    private ExoPlayer player;
+    private static final String CHANNEL_ID      = "sonix_music_playback";
+    private static final int    NOTIFICATION_ID  = 1001;
+
+    private ExoPlayer    player;
     private MediaSession mediaSession;
-    public static ExoPlayer currentPlayer;
+    public  static ExoPlayer currentPlayer;
+
+    // Track whether we are in "YouTube mode" (no real ExoPlayer stream)
+    private boolean ytMode = false;
+    private boolean ytPlaying = false;
+    private String  currentTitle  = "Sonix Music";
+    private String  currentArtist = "Playing...";
 
     private final android.os.Handler updateHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private final Runnable updateRunnable = new Runnable() {
-        @Override
-        public void run() {
+        @Override public void run() {
             if (player != null && player.isPlaying()) {
-                MusicPlayerPlugin.onStateChanged(true, player.getCurrentPosition(), player.getDuration(), player.getPlaybackState());
+                MusicPlayerPlugin.onStateChanged(true,
+                    player.getCurrentPosition(), player.getDuration(), player.getPlaybackState());
             }
             updateHandler.postDelayed(this, 1000);
         }
     };
 
-    private PendingIntent createActionIntent(String action) {
-        Intent intent = new Intent(this, MusicPlaybackService.class);
-        intent.setAction(action);
-        return PendingIntent.getService(this, 0, intent, PendingIntent.FLAG_IMMUTABLE);
+    // ── Pending intents for notification buttons ──────────────────────────────
+    private PendingIntent actionIntent(String action, int reqCode) {
+        Intent i = new Intent(this, MusicPlaybackService.class);
+        i.setAction(action);
+        return PendingIntent.getService(this, reqCode,
+            i, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
 
+    // ── Notification channel ─────────────────────────────────────────────────
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(
+            NotificationChannel ch = new NotificationChannel(
                 CHANNEL_ID,
                 "Playback Controls",
-                NotificationManager.IMPORTANCE_LOW
+                // HIGH importance → shows in status bar AND notification shade on Android 15+
+                NotificationManager.IMPORTANCE_HIGH
             );
-            channel.setDescription("Shows controls for the current song");
-            NotificationManager manager = getSystemService(NotificationManager.class);
-            if (manager != null) {
-                manager.createNotificationChannel(channel);
-            }
+            ch.setDescription("Music playback controls");
+            ch.setShowBadge(false);
+            ch.setSound(null, null);          // no sound for media channel
+            ch.enableVibration(false);
+            NotificationManager nm = getSystemService(NotificationManager.class);
+            if (nm != null) nm.createNotificationChannel(ch);
         }
     }
 
-    private void updateForegroundNotification(String title, String artist) {
-        Intent mainIntent = new Intent(this, MainActivity.class);
-        PendingIntent contentIntent = PendingIntent.getActivity(
-            this,
-            0,
-            mainIntent,
-            PendingIntent.FLAG_IMMUTABLE
-        );
+    // ── Build & post the foreground notification ──────────────────────────────
+    private void updateForegroundNotification(String title, String artist, boolean playing) {
+        currentTitle  = title  != null ? title  : "Sonix Music";
+        currentArtist = artist != null ? artist : "Playing...";
 
-        boolean isPlaying = player != null && player.isPlaying();
+        Intent mainIntent = new Intent(this, MainActivity.class);
+        mainIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent contentIntent = PendingIntent.getActivity(
+            this, 0, mainIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
         NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText(artist)
+            .setContentTitle(currentTitle)
+            .setContentText(currentArtist)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentIntent(contentIntent)
-            .setOngoing(isPlaying)
+            // ONGOING only while playing so user can dismiss when paused
+            .setOngoing(playing)
+            // Show on lock screen AND notification shade
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            // Prevent heads-up popup for every state change
+            .setOnlyAlertOnce(true)
+            // Android 12+ — show immediately in notification shade
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .addAction(new NotificationCompat.Action(
-                android.R.drawable.ic_media_previous, "Previous", createActionIntent(ACTION_PREVIOUS)))
+                android.R.drawable.ic_media_previous, "Previous",
+                actionIntent(ACTION_PREVIOUS, 1)))
             .addAction(new NotificationCompat.Action(
-                isPlaying ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play,
-                isPlaying ? "Pause" : "Play",
-                createActionIntent(ACTION_TOGGLE_PAUSE)))
+                playing ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play,
+                playing ? "Pause" : "Play",
+                actionIntent(ACTION_TOGGLE_PAUSE, 2)))
             .addAction(new NotificationCompat.Action(
-                android.R.drawable.ic_media_next, "Next", createActionIntent(ACTION_NEXT)))
+                android.R.drawable.ic_media_next, "Next",
+                actionIntent(ACTION_NEXT, 3)))
             .setStyle(new androidx.media.app.NotificationCompat.MediaStyle()
                 .setMediaSession(mediaSession.getSessionCompatToken())
                 .setShowActionsInCompactView(0, 1, 2));
@@ -111,12 +133,14 @@ public class MusicPlaybackService extends MediaSessionService {
         Notification notification = builder.build();
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+            startForeground(NOTIFICATION_ID, notification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
         } else {
             startForeground(NOTIFICATION_ID, notification);
         }
     }
 
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
     @Override
     public void onCreate() {
         super.onCreate();
@@ -127,14 +151,10 @@ public class MusicPlaybackService extends MediaSessionService {
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build();
 
-        androidx.media3.exoplayer.DefaultLoadControl loadControl = new androidx.media3.exoplayer.DefaultLoadControl.Builder()
-            .setBufferDurationsMs(
-                50000, // minBufferMs
-                100000, // maxBufferMs
-                2500, // bufferForPlaybackMs
-                5000  // bufferForPlaybackAfterRebufferMs
-            )
-            .build();
+        androidx.media3.exoplayer.DefaultLoadControl loadControl =
+            new androidx.media3.exoplayer.DefaultLoadControl.Builder()
+                .setBufferDurationsMs(50000, 100000, 2500, 5000)
+                .build();
 
         player = new ExoPlayer.Builder(this)
             .setLoadControl(loadControl)
@@ -143,101 +163,117 @@ public class MusicPlaybackService extends MediaSessionService {
         player.setHandleAudioBecomingNoisy(true);
         player.setWakeMode(C.WAKE_MODE_NETWORK);
 
-        // Wrap player to force Next/Previous commands to be available
-        androidx.media3.common.ForwardingPlayer forwardingPlayer = new androidx.media3.common.ForwardingPlayer(player) {
-            @Override
-            public androidx.media3.common.Player.Commands getAvailableCommands() {
-                return super.getAvailableCommands().buildUpon()
-                    .add(androidx.media3.common.Player.COMMAND_SEEK_TO_NEXT)
-                    .add(androidx.media3.common.Player.COMMAND_SEEK_TO_PREVIOUS)
-                    .build();
-            }
-
-            @Override
-            public boolean isCommandAvailable(int command) {
-                return command == androidx.media3.common.Player.COMMAND_SEEK_TO_NEXT ||
-                       command == androidx.media3.common.Player.COMMAND_SEEK_TO_PREVIOUS ||
-                       super.isCommandAvailable(command);
-            }
-        };
+        // ForwardingPlayer — always advertise Next/Prev commands so the
+        // system media session shows those buttons
+        androidx.media3.common.ForwardingPlayer fp =
+            new androidx.media3.common.ForwardingPlayer(player) {
+                @Override
+                public Player.Commands getAvailableCommands() {
+                    return super.getAvailableCommands().buildUpon()
+                        .add(Player.COMMAND_SEEK_TO_NEXT)
+                        .add(Player.COMMAND_SEEK_TO_PREVIOUS)
+                        .add(Player.COMMAND_PLAY_PAUSE)
+                        .build();
+                }
+                @Override
+                public boolean isCommandAvailable(int command) {
+                    return command == Player.COMMAND_SEEK_TO_NEXT
+                        || command == Player.COMMAND_SEEK_TO_PREVIOUS
+                        || command == Player.COMMAND_PLAY_PAUSE
+                        || super.isCommandAvailable(command);
+                }
+            };
 
         currentPlayer = player;
-        
-        forwardingPlayer.addListener(new Player.Listener() {
-            @Override
-            public void onPlaybackStateChanged(int playbackState) {
-                notifyState();
-            }
 
-            @Override
-            public void onIsPlayingChanged(boolean isPlaying) {
+        fp.addListener(new Player.Listener() {
+            @Override public void onPlaybackStateChanged(int state) { notifyState(); }
+            @Override public void onIsPlayingChanged(boolean isPlaying) {
                 notifyState();
-                if (isPlaying) {
-                    updateHandler.post(updateRunnable);
-                } else {
-                    updateHandler.removeCallbacks(updateRunnable);
-                }
+                if (isPlaying) updateHandler.post(updateRunnable);
+                else           updateHandler.removeCallbacks(updateRunnable);
             }
-
-            @Override
-            public void onPlayerError(androidx.media3.common.PlaybackException error) {
-                android.util.Log.e("SonixMusic", "Player Error: " + error.errorCode + " - " + error.getMessage(), error);
+            @Override public void onPlayerError(androidx.media3.common.PlaybackException e) {
+                android.util.Log.e("SonixMusic", "Player error: " + e.getMessage(), e);
             }
-
-            @Override
-            public void onMediaMetadataChanged(MediaMetadata mediaMetadata) {
-                notifyState();
-            }
+            @Override public void onMediaMetadataChanged(MediaMetadata m) { notifyState(); }
         });
 
-        mediaSession = new MediaSession.Builder(this, forwardingPlayer)
+        mediaSession = new MediaSession.Builder(this, fp)
             .setCallback(new MediaSession.Callback() {
                 @Override
-                public androidx.media3.session.MediaSession.ConnectionResult onConnect(
-                        MediaSession session, 
-                        androidx.media3.session.MediaSession.ControllerInfo controller) {
-                    androidx.media3.common.Player.Commands commands = androidx.media3.common.Player.Commands.EMPTY.buildUpon()
-                        .add(androidx.media3.common.Player.COMMAND_PLAY_PAUSE)
-                        .add(androidx.media3.common.Player.COMMAND_SEEK_TO_NEXT)
-                        .add(androidx.media3.common.Player.COMMAND_SEEK_TO_PREVIOUS)
-                        .add(androidx.media3.common.Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
-                        .add(androidx.media3.common.Player.COMMAND_STOP)
+                public MediaSession.ConnectionResult onConnect(
+                        MediaSession session, ControllerInfo controller) {
+                    Player.Commands cmds = Player.Commands.EMPTY.buildUpon()
+                        .add(Player.COMMAND_PLAY_PAUSE)
+                        .add(Player.COMMAND_SEEK_TO_NEXT)
+                        .add(Player.COMMAND_SEEK_TO_PREVIOUS)
+                        .add(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
+                        .add(Player.COMMAND_STOP)
                         .build();
-                    return new androidx.media3.session.MediaSession.ConnectionResult.AcceptedResultBuilder(session)
-                        .setAvailablePlayerCommands(commands)
+                    return new MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                        .setAvailablePlayerCommands(cmds)
                         .build();
                 }
 
                 @Override
-                public int onPlayerCommandRequest(MediaSession session, ControllerInfo controller, int playerCommand) {
-                    if (playerCommand == androidx.media3.common.Player.COMMAND_SEEK_TO_NEXT) {
+                public int onPlayerCommandRequest(
+                        MediaSession session, ControllerInfo controller, int playerCommand) {
+                    // Always relay Next/Prev to the web layer
+                    if (playerCommand == Player.COMMAND_SEEK_TO_NEXT) {
                         MusicPlayerPlugin.triggerWebAction("next");
+                        if (!ytMode && player.hasNextMediaItem()) {
+                            player.seekToNextMediaItem();
+                            player.play();
+                        }
                         return androidx.media3.session.SessionResult.RESULT_SUCCESS;
-                    } else if (playerCommand == androidx.media3.common.Player.COMMAND_SEEK_TO_PREVIOUS) {
+                    }
+                    if (playerCommand == Player.COMMAND_SEEK_TO_PREVIOUS) {
                         MusicPlayerPlugin.triggerWebAction("previous");
+                        if (!ytMode && player.hasPreviousMediaItem()) {
+                            player.seekToPreviousMediaItem();
+                            player.play();
+                        } else if (!ytMode) {
+                            player.seekToDefaultPosition(0);
+                            player.play();
+                        }
                         return androidx.media3.session.SessionResult.RESULT_SUCCESS;
+                    }
+                    if (playerCommand == Player.COMMAND_PLAY_PAUSE) {
+                        if (ytMode) {
+                            // Relay to web — web controls the YT iframe
+                            ytPlaying = !ytPlaying;
+                            MusicPlayerPlugin.triggerWebAction(ytPlaying ? "play" : "pause");
+                            updateForegroundNotification(currentTitle, currentArtist, ytPlaying);
+                            return androidx.media3.session.SessionResult.RESULT_SUCCESS;
+                        }
                     }
                     return androidx.media3.session.SessionResult.RESULT_SUCCESS;
                 }
             })
             .build();
+
         updateHandler.post(updateRunnable);
     }
 
     private void notifyState() {
-        if (player != null) {
-            MusicPlayerPlugin.onStateChanged(player.isPlaying(), player.getCurrentPosition(), player.getDuration(), player.getPlaybackState());
-            
-            MediaMetadata metadata = player.getMediaMetadata();
-            String title = metadata.title != null ? metadata.title.toString() : "Sonix Music";
-            String artist = metadata.artist != null ? metadata.artist.toString() : "Playing...";
-            
-            if (player.getPlaybackState() != Player.STATE_IDLE) {
-                updateForegroundNotification(title, artist);
-            }
+        if (player == null) return;
+        MusicPlayerPlugin.onStateChanged(
+            player.isPlaying(),
+            player.getCurrentPosition(),
+            player.getDuration(),
+            player.getPlaybackState());
+
+        MediaMetadata meta = player.getMediaMetadata();
+        String title  = meta.title  != null ? meta.title.toString()  : currentTitle;
+        String artist = meta.artist != null ? meta.artist.toString() : currentArtist;
+
+        if (player.getPlaybackState() != Player.STATE_IDLE) {
+            updateForegroundNotification(title, artist, player.isPlaying());
         }
     }
 
+    // ── onStartCommand ────────────────────────────────────────────────────────
     @Override
     public int onStartCommand(@Nullable Intent intent, int flags, int startId) {
         super.onStartCommand(intent, flags, startId);
@@ -251,66 +287,105 @@ public class MusicPlaybackService extends MediaSessionService {
     }
 
     private void handleAction(@Nullable Intent intent) {
-        if (intent == null || player == null) {
-            return;
-        }
-
+        if (intent == null || player == null) return;
         String action = intent.getAction();
-        if (TextUtils.isEmpty(action)) {
-            return;
-        }
+        if (TextUtils.isEmpty(action)) return;
 
         try {
             switch (action) {
                 case ACTION_PLAY_SINGLE:
+                    ytMode = false;
                     playSingle(intent);
                     break;
+
                 case ACTION_PLAY_QUEUE:
+                    ytMode = false;
                     playQueue(intent);
                     break;
+
+                // ── YouTube-mode: update notification metadata only ──────────
+                case ACTION_UPDATE_META:
+                    ytMode    = true;
+                    ytPlaying = intent.getBooleanExtra("isPlaying", true);
+                    currentTitle  = intent.getStringExtra("title")  != null
+                        ? intent.getStringExtra("title")  : "Sonix Music";
+                    currentArtist = intent.getStringExtra("artist") != null
+                        ? intent.getStringExtra("artist") : "Playing...";
+                    updateForegroundNotification(currentTitle, currentArtist, ytPlaying);
+                    break;
+
                 case ACTION_PAUSE:
-                    player.pause();
+                    if (ytMode) {
+                        ytPlaying = false;
+                        MusicPlayerPlugin.triggerWebAction("pause");
+                        updateForegroundNotification(currentTitle, currentArtist, false);
+                    } else {
+                        player.pause();
+                    }
                     break;
+
                 case ACTION_RESUME:
-                    player.play();
+                    if (ytMode) {
+                        ytPlaying = true;
+                        MusicPlayerPlugin.triggerWebAction("play");
+                        updateForegroundNotification(currentTitle, currentArtist, true);
+                    } else {
+                        player.play();
+                    }
                     break;
-                case ACTION_STOP:
-                    player.stop();
-                    stopForeground(true);
-                    stopSelf();
-                    break;
+
                 case ACTION_TOGGLE_PAUSE:
-                    if (player.isPlaying()) player.pause();
-                    else player.play();
+                    if (ytMode) {
+                        ytPlaying = !ytPlaying;
+                        MusicPlayerPlugin.triggerWebAction(ytPlaying ? "play" : "pause");
+                        updateForegroundNotification(currentTitle, currentArtist, ytPlaying);
+                    } else {
+                        if (player.isPlaying()) player.pause();
+                        else                    player.play();
+                    }
                     break;
+
                 case ACTION_NEXT:
                     MusicPlayerPlugin.triggerWebAction("next");
-                    if (player.hasNextMediaItem()) {
+                    if (!ytMode && player.hasNextMediaItem()) {
                         player.seekToNextMediaItem();
                         player.play();
                     }
                     break;
+
                 case ACTION_PREVIOUS:
                     MusicPlayerPlugin.triggerWebAction("previous");
-                    if (player.hasPreviousMediaItem()) {
-                        player.seekToPreviousMediaItem();
-                        player.play();
-                    } else {
-                        player.seekToDefaultPosition(0);
-                        player.play();
+                    if (!ytMode) {
+                        if (player.hasPreviousMediaItem()) {
+                            player.seekToPreviousMediaItem();
+                            player.play();
+                        } else {
+                            player.seekToDefaultPosition(0);
+                            player.play();
+                        }
                     }
                     break;
-                case ACTION_SEEK:
-                    long positionMs = Math.max(0L, intent.getLongExtra("positionMs", 0L));
-                    player.seekTo(positionMs);
+
+                case ACTION_STOP:
+                    ytMode = false;
+                    player.stop();
+                    stopForeground(true);
+                    stopSelf();
                     break;
+
+                case ACTION_SEEK:
+                    long posMs = Math.max(0L, intent.getLongExtra("positionMs", 0L));
+                    if (!ytMode) player.seekTo(posMs);
+                    break;
+
                 case ACTION_SET_SHUFFLE:
                     player.setShuffleModeEnabled(intent.getBooleanExtra("enabled", false));
                     break;
+
                 case ACTION_SET_REPEAT:
-                    String mode = intent.getStringExtra("repeatMode");
-                    player.setRepeatMode(mapRepeatMode(mode));
+                    player.setRepeatMode(mapRepeatMode(intent.getStringExtra("repeatMode")));
                     break;
+
                 default:
                     break;
             }
@@ -319,38 +394,27 @@ public class MusicPlaybackService extends MediaSessionService {
         }
     }
 
+    // ── Queue / item builders ─────────────────────────────────────────────────
     private void playSingle(Intent intent) {
         String url = intent.getStringExtra("url");
-        if (TextUtils.isEmpty(url)) {
-            return;
-        }
-        
-        String title = intent.getStringExtra("title");
-        String artist = intent.getStringExtra("artist");
-        
-        MediaItem item = buildItem(
+        if (TextUtils.isEmpty(url)) return;
+        player.setMediaItem(buildItem(
             url,
-            title,
-            artist,
+            intent.getStringExtra("title"),
+            intent.getStringExtra("artist"),
             intent.getStringExtra("album"),
-            intent.getStringExtra("artwork")
-        );
-        
-        player.setMediaItem(item);
+            intent.getStringExtra("artwork")));
         player.prepare();
         player.play();
     }
 
     private void playQueue(Intent intent) {
         String queueJson = intent.getStringExtra("queue");
-        if (TextUtils.isEmpty(queueJson)) {
-            playSingle(intent);
-            return;
-        }
+        if (TextUtils.isEmpty(queueJson)) { playSingle(intent); return; }
 
-        int index = Math.max(0, intent.getIntExtra("index", 0));
+        int    index   = Math.max(0, intent.getIntExtra("index", 0));
         boolean shuffle = intent.getBooleanExtra("shuffle", false);
-        String repeat = intent.getStringExtra("repeatMode");
+        String  repeat  = intent.getStringExtra("repeatMode");
 
         List<MediaItem> items = new ArrayList<>();
         try {
@@ -360,26 +424,16 @@ public class MusicPlaybackService extends MediaSessionService {
                 if (obj == null) continue;
                 String url = obj.optString("url", "");
                 if (TextUtils.isEmpty(url)) continue;
-                items.add(buildItem(
-                    url,
-                    obj.optString("title", "Unknown Track"),
+                items.add(buildItem(url,
+                    obj.optString("title",  "Unknown Track"),
                     obj.optString("artist", "Unknown Artist"),
-                    obj.optString("album", "Sonix Music"),
-                    obj.optString("artwork", "")
-                ));
+                    obj.optString("album",  "Sonix Music"),
+                    obj.optString("artwork", "")));
             }
-        } catch (Exception e) {
-            e.printStackTrace();
-            return;
-        }
+        } catch (Exception e) { e.printStackTrace(); return; }
 
-        if (items.isEmpty()) {
-            return;
-        }
-
-        if (index >= items.size()) {
-            index = 0;
-        }
+        if (items.isEmpty()) return;
+        if (index >= items.size()) index = 0;
 
         player.setShuffleModeEnabled(shuffle);
         player.setRepeatMode(mapRepeatMode(repeat));
@@ -389,51 +443,37 @@ public class MusicPlaybackService extends MediaSessionService {
     }
 
     private MediaItem buildItem(String url, String title, String artist, String album, String artwork) {
-        MediaMetadata.Builder metaBuilder = new MediaMetadata.Builder()
-            .setTitle(title != null ? title : "Unknown Track")
-            .setArtist(artist != null ? artist : "Unknown Artist")
+        MediaMetadata.Builder mb = new MediaMetadata.Builder()
+            .setTitle(title   != null ? title   : "Unknown Track")
+            .setArtist(artist != null ? artist  : "Unknown Artist")
             .setAlbumTitle(album != null ? album : "Sonix Music");
-
         if (!TextUtils.isEmpty(artwork)) {
-            try {
-                metaBuilder.setArtworkUri(android.net.Uri.parse(artwork));
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
+            try { mb.setArtworkUri(android.net.Uri.parse(artwork)); } catch (Exception ignored) {}
         }
-
-        return new MediaItem.Builder()
-            .setUri(url)
-            .setMediaMetadata(metaBuilder.build())
-            .build();
+        return new MediaItem.Builder().setUri(url).setMediaMetadata(mb.build()).build();
     }
+
     private int mapRepeatMode(String mode) {
-        if ("one".equalsIgnoreCase(mode)) {
-            return Player.REPEAT_MODE_ONE;
-        }
-        if ("all".equalsIgnoreCase(mode)) {
-            return Player.REPEAT_MODE_ALL;
-        }
+        if ("one".equalsIgnoreCase(mode)) return Player.REPEAT_MODE_ONE;
+        if ("all".equalsIgnoreCase(mode)) return Player.REPEAT_MODE_ALL;
         return Player.REPEAT_MODE_OFF;
     }
 
+    // ── Cleanup ───────────────────────────────────────────────────────────────
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        if (!player.getPlayWhenReady() || player.getPlaybackState() == Player.STATE_IDLE || player.getPlaybackState() == Player.STATE_ENDED) {
+        if (!player.getPlayWhenReady()
+                || player.getPlaybackState() == Player.STATE_IDLE
+                || player.getPlaybackState() == Player.STATE_ENDED) {
             stopSelf();
         }
     }
 
     @Override
     public void onDestroy() {
-        if (mediaSession != null) {
-            mediaSession.release();
-            mediaSession = null;
-        }
-        if (player != null) {
-            player.release();
-            player = null;
-        }
+        updateHandler.removeCallbacks(updateRunnable);
+        if (mediaSession != null) { mediaSession.release(); mediaSession = null; }
+        if (player != null)       { player.release();       player = null; }
         super.onDestroy();
     }
 }

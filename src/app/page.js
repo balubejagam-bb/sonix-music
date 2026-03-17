@@ -395,7 +395,9 @@ export default function Home() {
 
       const actionListener = NativeMusicPlayer.addListener('onWebAction', (res) => {
         if (res.action === 'next') handleNext();
-        if (res.action === 'previous') handlePrev();
+        else if (res.action === 'previous') handlePrev();
+        else if (res.action === 'play') { yt.play(); setNativeIsPlaying(true); }
+        else if (res.action === 'pause') { yt.pause(); setNativeIsPlaying(false); }
       });
 
       // Fallback polling (less frequent)
@@ -880,6 +882,17 @@ export default function Home() {
       setIsLoadingSong(false);
       setLoadingSongKey(null);
 
+      // On Android: push metadata to the native notification so buttons work for YT songs
+      if (nativeAndroid) {
+        try {
+          await NativeMusicPlayer.updateMeta({
+            title: playableSong.title || 'Unknown Track',
+            artist: playableSong.artist || 'Unknown Artist',
+            isPlaying: true,
+          });
+        } catch (e) { /* non-fatal */ }
+      }
+
       if (resolvedVideoId) {
         const started = yt.playVideoById(resolvedVideoId);
         // loadedVideoIdRef is updated inside playVideoById
@@ -951,6 +964,14 @@ export default function Home() {
     // Keep mediaSession playbackState in sync (shows correct icon in notification)
     if ('mediaSession' in navigator) {
       navigator.mediaSession.playbackState = yt.isPlaying ? 'playing' : 'paused';
+    }
+    // Keep Android notification play/pause icon in sync for YT songs
+    if (nativeAndroid && currentSong.videoId) {
+      NativeMusicPlayer.updateMeta({
+        title: currentSong.title || 'Unknown Track',
+        artist: currentSong.artist || 'Unknown Artist',
+        isPlaying: yt.isPlaying,
+      }).catch(() => {});
     }
   }, [currentSong, yt.isPlaying]);
 
