@@ -1756,71 +1756,33 @@ export default function Home() {
   async function switchToVideoMode() {
     if (!currentSong) return;
     if (nativeAndroid) {
-      const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
-      if (!videoId) return;
+      const targetVideoId = currentSong.videoId || await resolveSongVideoId(currentSong);
+      if (!targetVideoId) return;
       try {
-      const resumeAt = yt.currentTime || 0;
-      setVideoEnabled(false);
+        const resumeAt = yt.currentTime || 0;
 
-      // If native track is already loaded, resume that.
-      if (nativeTrackLoadedRef.current) {
-        try {
-          await NativeMusicPlayer.resume();
-          if (resumeAt > 0) {
-            await NativeMusicPlayer.seekTo({ positionMs: resumeAt * 1000 }).catch(() => {});
-          }
-          setNativeIsPlaying(true);
-          nativeShouldPlayRef.current = true;
-          return;
-        } catch {}
-      }
+        if (nativeTrackLoadedRef.current || nativeIsPlaying) {
+          await NativeMusicPlayer.pause().catch(() => {});
+        }
 
-      const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
-      const streamUrl = await resolveAudioStreamForSong(currentSong, videoId);
-
-      if (streamUrl) {
-        try {
-          await NativeMusicPlayer.playQueue({
-            queue: [{
-              url: streamUrl,
-              title: currentSong.title || 'Unknown Track',
-              artist: currentSong.artist || 'Unknown Artist',
-              album: currentSong.album || 'Sonix Music',
-              artwork: currentSong.image || currentSong.thumbnail || '',
-            }],
-            index: 0,
-            shuffle: shuffleEnabled,
-            repeatMode,
-          });
-          if (resumeAt > 0) {
-            await NativeMusicPlayer.seekTo({ positionMs: resumeAt * 1000 }).catch(() => {});
-          }
-          setCurrentSong(prev => prev ? { ...prev, url: streamUrl, videoId: videoId || prev.videoId } : prev);
-          nativeTrackLoadedRef.current = true;
-          setNativeIsPlaying(true);
-          nativeShouldPlayRef.current = true;
-          return;
-        } catch {}
-      }
-
-      // Final fallback: web audio/video to ensure user can still hear playback.
-      nativeTrackLoadedRef.current = false;
-      setNativeIsPlaying(false);
-      nativeShouldPlayRef.current = false;
-      if (streamUrl) {
-        yt.playStream(streamUrl);
-        if (resumeAt > 0) setTimeout(() => yt.seekTo(resumeAt), 120);
-      } else if (videoId) {
-        yt.playVideoById(videoId);
-      } else {
-        yt.searchAndPlay(currentSong.title || '', currentSong.artist || '', currentSong.type || 'song');
-      }
+        setNativeIsPlaying(false);
+        nativeShouldPlayRef.current = false;
+        setVideoEnabled(true);
+        yt.playVideoById(targetVideoId);
+        if (resumeAt > 0) {
+          setTimeout(() => yt.seekTo(resumeAt), 350);
+        }
+        if (!currentSong.videoId) {
+          setCurrentSong(prev => prev ? { ...prev, videoId: targetVideoId } : prev);
+        }
+        return;
       } catch {}
       nativeShouldPlayRef.current = false;
       setNativeIsPlaying(false);
       setVideoEnabled(true);
-      yt.playVideoById(videoId);
-      if (!currentSong.videoId) setCurrentSong(prev => prev ? { ...prev, videoId } : prev);
+      yt.pause();
+      yt.playVideoById(targetVideoId);
+      if (!currentSong.videoId) setCurrentSong(prev => prev ? { ...prev, videoId: targetVideoId } : prev);
       return;
     }
     const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
@@ -1846,6 +1808,7 @@ export default function Home() {
     }
     if (nativeAndroid) {
       if (videoEnabled) {
+        yt.pause();
         const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
         const streamUrl = await resolveAudioStreamForSong(currentSong, videoId);
         if (streamUrl) {
@@ -1889,21 +1852,32 @@ export default function Home() {
   }
 
   async function handlePlayPauseToggle() {
-    if (nativeAndroid && currentSong && !videoEnabled && nativeTrackLoadedRef.current) {
+    if (nativeAndroid && currentSong && !videoEnabled) {
       try {
-        if (nativeIsPlaying) {
-          await NativeMusicPlayer.pause();
-          setNativeIsPlaying(false);
-          nativeShouldPlayRef.current = false;
-        } else {
-          await NativeMusicPlayer.resume();
-          setNativeIsPlaying(true);
-          nativeShouldPlayRef.current = true;
+        let shouldUseNative = nativeTrackLoadedRef.current || nativeIsPlaying;
+        if (!shouldUseNative) {
+          const status = await NativeMusicPlayer.getStatus().catch(() => null);
+          shouldUseNative = !!status?.currentTrack?.url || Number(status?.duration || 0) > 0;
+        }
+
+        if (shouldUseNative) {
+          const status = await NativeMusicPlayer.getStatus().catch(() => null);
+          const currentlyPlaying = typeof status?.isPlaying === 'boolean' ? status.isPlaying : nativeIsPlaying;
+
+          if (currentlyPlaying) {
+            await NativeMusicPlayer.pause();
+            setNativeIsPlaying(false);
+            nativeShouldPlayRef.current = false;
+          } else {
+            await NativeMusicPlayer.resume();
+            setNativeIsPlaying(true);
+            nativeShouldPlayRef.current = true;
+          }
+          return;
         }
       } catch (e) {
-        console.error('Native play/pause failed:', e);
+        console.error('Native play/pause failed, falling back to web toggle:', e);
       }
-      return;
     }
 
     if (!currentSong) return;
