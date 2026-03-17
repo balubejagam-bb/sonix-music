@@ -383,6 +383,8 @@ export default function Home() {
   const [shuffleEnabled, setShuffleEnabled] = useState(false);
   const [repeatMode, setRepeatMode] = useState('off'); // off, all, one
   const [activeHeroIndex, setActiveHeroIndex] = useState(0);
+  const [homeSectionsReady, setHomeSectionsReady] = useState(false);
+  const browseAllRef = useRef(null);
 
   // Auto-rotate hero every 8 seconds
   useEffect(() => {
@@ -392,6 +394,21 @@ export default function Home() {
     }, 8000);
     return () => clearInterval(interval);
   }, [view, search, songs.length]);
+
+  // Lazy-render lower home sections to reduce first-paint work on mobile.
+  useEffect(() => {
+    if (view !== 'home' || search.trim()) return;
+    setHomeSectionsReady(false);
+    const run = () => setHomeSectionsReady(true);
+
+    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+      const id = window.requestIdleCallback(run, { timeout: 300 });
+      return () => window.cancelIdleCallback(id);
+    }
+
+    const t = setTimeout(run, 180);
+    return () => clearTimeout(t);
+  }, [view, search]);
   const [optimisticPlaying, setOptimisticPlaying] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [voiceTranscript, setVoiceTranscript] = useState('');
@@ -403,6 +420,7 @@ export default function Home() {
   // Use refs for queue to avoid stale closures in next/prev
   const queueRef = useRef([]);
   const queueIndexRef = useRef(0);
+  const playRequestIdRef = useRef(0);
   const videoIdCacheRef = useRef(new Map());
   const streamUrlCacheRef = useRef(new Map());
   const pendingVideoIdRef = useRef(new Map());
@@ -1124,6 +1142,8 @@ export default function Home() {
     // Use ref-based guard so next/prev can always bypass
     if (isLoadingSongRef.current && !force) return;
     isLoadingSongRef.current = true;
+    const requestId = ++playRequestIdRef.current;
+    const isStale = () => requestId !== playRequestIdRef.current;
 
     const key = songKey(song);
     setIsLoadingSong(true);
@@ -1159,6 +1179,7 @@ export default function Home() {
             const res = await fetch(
               apiPath(`/api/stream?url=${encodeURIComponent(song.url)}&title=${encodeURIComponent(song.title || '')}&artist=${encodeURIComponent(song.artist || '')}`)
             );
+            if (isStale()) return;
             const data = await res.json();
             if (data.streamUrl) streamUrl = data.streamUrl;
           }
@@ -1171,6 +1192,7 @@ export default function Home() {
               const query = `${song.title || ''} ${song.artist || ''}${suffix}`.trim();
               try {
                 const res = await fetch(apiPath(`/api/youtube-search?q=${encodeURIComponent(query)}`));
+                if (isStale()) return;
                 const data = await res.json();
                 if (data.videoId) videoId = data.videoId;
               } catch {}
@@ -1180,6 +1202,7 @@ export default function Home() {
             if (videoId) {
               try {
                 const res = await fetch(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(videoId)}`));
+                if (isStale()) return;
                 const data = await res.json();
                 if (data.streamUrl) streamUrl = data.streamUrl;
               } catch {}
@@ -1189,6 +1212,7 @@ export default function Home() {
             if (!streamUrl && videoId) {
               try {
                 const res = await fetch(apiPath(`/api/youtube-search?q=${encodeURIComponent((song.title || '') + ' ' + (song.artist || ''))}&stream=true`));
+                if (isStale()) return;
                 const data = await res.json();
                 if (data.videoId) videoId = data.videoId;
                 if (data.streamUrl) streamUrl = data.streamUrl;
@@ -1197,6 +1221,7 @@ export default function Home() {
           }
 
           if (streamUrl) {
+            if (isStale()) return;
             streamUrlCacheRef.current.set(key, streamUrl);
             try { localStorage.setItem(`sonix_stream_${key}`, streamUrl); } catch {}
 
@@ -1239,6 +1264,7 @@ export default function Home() {
               shuffle: shuffleEnabled,
               repeatMode,
             });
+            if (isStale()) return;
 
             await NativeMusicPlayer.updateMeta({
               title: songWithUrl.title || 'Unknown Track',
@@ -1278,6 +1304,7 @@ export default function Home() {
 
       // Web path (browser / non-Android)
       const resolvedVideoId = await resolveSongVideoId(song);
+      if (isStale()) return;
       const playableSong = (resolvedVideoId && !song.videoId) ? { ...song, videoId: resolvedVideoId } : song;
 
       const vId = playableSong.videoId || resolvedVideoId;
@@ -1290,6 +1317,7 @@ export default function Home() {
           yt.playVideoById(vId);
         } else {
           const streamUrl = await resolveAudioStreamForSong(playableSong, vId);
+          if (isStale()) return;
           if (streamUrl) {
             yt.playStream(streamUrl);
           } else {
@@ -1298,10 +1326,12 @@ export default function Home() {
         }
       } else {
         const fallbackVideoId = await resolveSongVideoId(playableSong);
+        if (isStale()) return;
         if (fallbackVideoId) {
           const nextSong = { ...playableSong, videoId: fallbackVideoId };
           setCurrentSong(nextSong);
           const streamUrl = await resolveAudioStreamForSong(nextSong, fallbackVideoId);
+          if (isStale()) return;
           if (streamUrl) yt.playStream(streamUrl);
           else yt.playVideoById(fallbackVideoId);
         } else {
@@ -1548,6 +1578,10 @@ export default function Home() {
 
   async function switchToVideoMode() {
     if (!currentSong) return;
+    if (nativeAndroid) {
+      await NativeMusicPlayer.pause().catch(() => {});
+      setNativeIsPlaying(false);
+    }
     const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
     if (!videoId) return;
     const resumeAt = yt.currentTime || 0;
@@ -1588,7 +1622,7 @@ export default function Home() {
   }
 
   async function handlePlayPauseToggle() {
-    if (nativeAndroid && currentSong) {
+    if (nativeAndroid && currentSong && !videoEnabled) {
       try {
         if (nativeIsPlaying) {
           await NativeMusicPlayer.pause();
@@ -1787,6 +1821,20 @@ export default function Home() {
   function loadMore() { 
     if (view === 'podcasts') loadPodcasts(page + 1, { search });
     else loadSongs(page + 1, { search, genre, source }); 
+  }
+
+  async function handleTrendingViewAll() {
+    setSearch('');
+    setView('home');
+    if (source !== 'all') {
+      setSource('all');
+      await loadSongs(1, { genre, source: 'all' });
+    } else if (!songs.length) {
+      await loadSongs(1, { genre, source });
+    }
+    setTimeout(() => {
+      browseAllRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 120);
   }
 
   const displaySongs = search.trim() ? searchResults : songs;
@@ -1997,7 +2045,7 @@ export default function Home() {
               {/* Trending Row */}
               <div className="section-header">
                 <h2>Trending This Week</h2>
-                <button className="view-all">View All</button>
+                <button className="view-all" onClick={handleTrendingViewAll}>View All</button>
               </div>
               <div className="horizontal-scroll">
                 {songs.slice(0, 10).map((s, i) => (
@@ -2012,39 +2060,43 @@ export default function Home() {
                 ))}
               </div>
 
-              {/* New Releases Row */}
-              <div className="section-header">
-                <h2>New Releases</h2>
-                <button className="view-all">Browse</button>
-              </div>
-              <div className="horizontal-scroll">
-                {songs.slice(10, 20).map((s, i) => (
-                  <div key={i} className="premium-card" onClick={() => playSongDirect(s, songs)}>
-                    <div className="card-img-wrap">
-                      <img src={s.thumbnail || s.image || 'https://picsum.photos/seed/sonix2/200'} style={{ width: '100%', height: '100%', objectFit: 'cover' }} alt="" />
-                      <div className="card-play-btn">▶</div>
-                    </div>
-                    <div className="card-title">{decodeHtml(s.title)}</div>
-                    <div className="card-subtitle">{decodeHtml(s.artist)}</div>
+              {homeSectionsReady && (
+                <>
+                  {/* New Releases Row */}
+                  <div className="section-header">
+                    <h2>New Releases</h2>
+                    <button className="view-all" onClick={handleTrendingViewAll}>Browse</button>
                   </div>
-                ))}
-              </div>
+                  <div className="horizontal-scroll">
+                    {songs.slice(10, 20).map((s, i) => (
+                      <div key={i} className="premium-card" onClick={() => playSongDirect(s, songs)}>
+                        <div className="card-img-wrap">
+                          <img src={s.thumbnail || s.image || 'https://picsum.photos/seed/sonix2/200'} style={{ width: '100%', height: '100%', objectFit: 'cover' }} alt="" />
+                          <div className="card-play-btn">▶</div>
+                        </div>
+                        <div className="card-title">{decodeHtml(s.title)}</div>
+                        <div className="card-subtitle">{decodeHtml(s.artist)}</div>
+                      </div>
+                    ))}
+                  </div>
 
-              {/* Top Artists (Circular) */}
-              <div className="section-header">
-                <h2>Top Singers</h2>
-              </div>
-              <div className="horizontal-scroll" style={{ paddingBottom: 50 }}>
-                {Array.from(new Set(songs.map(s => s.artist))).slice(0, 8).map((artist, i) => (
-                  <div key={i} className="artist-card" onClick={() => { setSearch(artist); setView('search'); }}>
-                    <img src={`https://picsum.photos/seed/${artist}/200`} className="artist-img" alt="" />
-                    <div className="artist-name">{decodeHtml(artist)}</div>
+                  {/* Top Artists (Circular) */}
+                  <div className="section-header">
+                    <h2>Top Singers</h2>
                   </div>
-                ))}
-              </div>
+                  <div className="horizontal-scroll" style={{ paddingBottom: 50 }}>
+                    {Array.from(new Set(songs.map(s => s.artist))).slice(0, 8).map((artist, i) => (
+                      <div key={i} className="artist-card" onClick={() => { setSearch(artist); setView('search'); }}>
+                        <img src={`https://picsum.photos/seed/${artist}/200`} className="artist-img" alt="" />
+                        <div className="artist-name">{decodeHtml(artist)}</div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
 
               {/* Standard List Title below */}
-              <div className="section-header">
+              <div className="section-header" ref={browseAllRef}>
                 <h2>Browse All Tracks</h2>
                 <span style={{ color: '#9ca3af', fontSize: '13px' }}>{totalSongs.toLocaleString()} tracks</span>
               </div>
