@@ -1404,7 +1404,7 @@ export default function Home() {
             });
             if (isStale()) return;
 
-            // Verify native player actually started; if not, fail over to web audio/video.
+            // Verify native player actually started.
             let nativeReady = false;
             for (let i = 0; i < 3; i++) {
               await sleep(700);
@@ -1420,18 +1420,11 @@ export default function Home() {
             }
 
             if (!nativeReady) {
-              console.warn('[Android] Native player did not start; falling back to web audio path.');
+              console.warn('[Android] Native player did not start via ExoPlayer.');
               nativeTrackLoadedRef.current = false;
               setNativeIsPlaying(false);
               nativeShouldPlayRef.current = false;
               setCurrentSong(songWithUrl);
-              if (videoId) {
-                const webStream = await resolveAudioStreamForSong(songWithUrl, videoId);
-                if (webStream) yt.playStream(webStream);
-                else yt.playVideoById(videoId);
-              } else {
-                await yt.searchAndPlay(song.title || '', song.artist || '', song.type || 'song');
-              }
               isLoadingSongRef.current = false;
               setIsLoadingSong(false);
               setLoadingSongKey(null);
@@ -1451,26 +1444,13 @@ export default function Home() {
             return;
           }
 
-          // Stream resolution failed — fallback to YouTube iframe so song still plays.
-          console.warn('[Android] Native stream failed, falling back to YouTube for:', song.title);
-          const fallbackVideoId = videoId || await resolveSongVideoId(song);
-          setCurrentSong({ ...song, videoId: fallbackVideoId || song.videoId || null });
+          // Stream resolution failed — keep Android audio path Exo-only.
+          console.warn('[Android] Native stream resolution failed for ExoPlayer:', song.title);
+          setCurrentSong({ ...song, videoId: videoId || song.videoId || null });
           setNativeIsPlaying(false);
           nativeTrackLoadedRef.current = false;
           nativeShouldPlayRef.current = false;
           setVideoEnabled(false);
-          if (fallbackVideoId) {
-            yt.playVideoById(fallbackVideoId);
-            isLoadingSongRef.current = false;
-            setIsLoadingSong(false);
-            setLoadingSongKey(null);
-            return;
-          }
-
-          const ok = await yt.searchAndPlay(song.title || '', song.artist || '', song.type || 'song');
-          if (!ok) {
-            console.error('[Android] Both native stream and YT fallback failed:', song.title);
-          }
           isLoadingSongRef.current = false;
           setIsLoadingSong(false);
           setLoadingSongKey(null);
@@ -1592,12 +1572,15 @@ export default function Home() {
 
   useEffect(() => {
     if (!currentSong) return;
-    syncNativeMediaControls(currentSong, yt.isPlaying);
+    const uiPlayingState = nativeAndroid && !videoEnabled
+      ? (nativeIsPlaying || optimisticPlaying)
+      : yt.isPlaying;
+    syncNativeMediaControls(currentSong, uiPlayingState);
     // Keep mediaSession playbackState in sync (shows correct icon in notification)
     if ('mediaSession' in navigator) {
-      navigator.mediaSession.playbackState = yt.isPlaying ? 'playing' : 'paused';
+      navigator.mediaSession.playbackState = uiPlayingState ? 'playing' : 'paused';
     }
-  }, [currentSong, yt.isPlaying]);
+  }, [currentSong, yt.isPlaying, nativeAndroid, videoEnabled, nativeIsPlaying, optimisticPlaying]);
 
   useEffect(() => {
     return () => {
