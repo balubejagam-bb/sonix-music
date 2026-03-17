@@ -59,6 +59,10 @@ function useYouTubePlayer() {
   const loadedVideoIdRef  = useRef(null);
   const streamUrlRef      = useRef(null);
 
+  function isValidYouTubeVideoId(vId) {
+    return typeof vId === 'string' && /^[A-Za-z0-9_-]{11}$/.test(vId.trim());
+  }
+
   // Stable refs so event handlers inside YT.Player never go stale
   const startTimerRef = useRef(null);
   const stopTimerRef  = useRef(null);
@@ -143,7 +147,7 @@ function useYouTubePlayer() {
           events: {
             onReady: () => {
               setYtReady(true);
-              if (pendingVideoIdRef.current) {
+              if (isValidYouTubeVideoId(pendingVideoIdRef.current)) {
                 try {
                   playerRef.current.loadVideoById(pendingVideoIdRef.current);
                   playerRef.current.playVideo();
@@ -233,12 +237,12 @@ function useYouTubePlayer() {
       const q1 = `${title} ${artist}${suffix}`.trim();
       const r1 = await fetch(clientApiPath(`/api/youtube-search?q=${encodeURIComponent(q1)}`));
       const d1 = await r1.json();
-      if (d1.videoId) { playVideoById(d1.videoId); return true; }
+      if (isValidYouTubeVideoId(d1?.videoId)) { playVideoById(d1.videoId); return true; }
 
       const q2 = `${title} ${artist} song`.trim();
       const r2 = await fetch(clientApiPath(`/api/youtube-search?q=${encodeURIComponent(q2)}`));
       const d2 = await r2.json();
-      if (d2.videoId) { playVideoById(d2.videoId); return true; }
+      if (isValidYouTubeVideoId(d2?.videoId)) { playVideoById(d2.videoId); return true; }
     } catch (e) { console.error('YT searchAndPlay failed:', e); }
     return false;
   }
@@ -255,20 +259,21 @@ function useYouTubePlayer() {
   }
 
   function playVideoById(vId) {
-    if (!vId) return false;
+    if (!isValidYouTubeVideoId(vId)) return false;
+    const videoId = vId.trim();
     
     // Stop direct audio if playing
     const a = playerRef.current_audio;
     if (a) { a.pause(); a.src = ''; }
 
     if (!isReady()) {
-      pendingVideoIdRef.current = vId;
+      pendingVideoIdRef.current = videoId;
       return false;
     }
     try {
-      playerRef.current.loadVideoById(vId);
+      playerRef.current.loadVideoById(videoId);
       playerRef.current.playVideo();
-      loadedVideoIdRef.current = vId;
+      loadedVideoIdRef.current = videoId;
       return true;
     } catch (e) {
       console.error('playVideoById failed:', e);
@@ -578,10 +583,13 @@ export default function Home() {
         }
       } else {
         console.log('[Sonix] App foregrounded. Syncing states.');
-        if (!nativeAndroid && (optimisticPlaying || yt.isPlaying || nativeIsPlaying)) {
-          if (yt.silentAudioRef.current && yt.silentAudioRef.current.paused) {
-            yt.silentAudioRef.current.play().catch(() => {});
-          }
+        if (
+          !nativeAndroid &&
+          (optimisticPlaying || yt.isPlaying || nativeIsPlaying) &&
+          yt.silentAudioRef.current &&
+          yt.silentAudioRef.current.paused
+        ) {
+          yt.silentAudioRef.current.play().catch(() => {});
         }
       }
     };
@@ -928,20 +936,26 @@ export default function Home() {
     if (!song) return null;
     const key = songKey(song);
 
-    if (song.videoId) {
-      videoIdCacheRef.current.set(key, song.videoId);
-      return song.videoId;
+    if (song.videoId && typeof song.videoId === 'string') {
+      const sanitized = song.videoId.trim();
+      if (/^[A-Za-z0-9_-]{11}$/.test(sanitized)) {
+        videoIdCacheRef.current.set(key, sanitized);
+        return sanitized;
+      }
     }
 
     const cachedVideoId = videoIdCacheRef.current.get(key);
-    if (cachedVideoId && typeof cachedVideoId === 'string') return cachedVideoId;
+    if (cachedVideoId && typeof cachedVideoId === 'string' && /^[A-Za-z0-9_-]{11}$/.test(cachedVideoId.trim())) {
+      return cachedVideoId.trim();
+    }
 
     // Check localStorage cache for cross-session persistence
     try {
       const persisted = localStorage.getItem(`yt_vid_${key}`);
-      if (persisted) {
-        videoIdCacheRef.current.set(key, persisted);
-        return persisted;
+      if (persisted && /^[A-Za-z0-9_-]{11}$/.test(persisted.trim())) {
+        const sanitized = persisted.trim();
+        videoIdCacheRef.current.set(key, sanitized);
+        return sanitized;
       }
     } catch {}
 
@@ -953,10 +967,11 @@ export default function Home() {
     const query = `${song.title || ''} ${song.artist || ''}${suffix}`.trim();
     const task = searchYouTubeFallback(query)
       .then(data => {
-        if (data?.videoId) {
-          videoIdCacheRef.current.set(key, data.videoId);
-          try { localStorage.setItem(`yt_vid_${key}`, data.videoId); } catch {}
-          return data.videoId;
+        const candidate = typeof data?.videoId === 'string' ? data.videoId.trim() : '';
+        if (/^[A-Za-z0-9_-]{11}$/.test(candidate)) {
+          videoIdCacheRef.current.set(key, candidate);
+          try { localStorage.setItem(`yt_vid_${key}`, candidate); } catch {}
+          return candidate;
         }
         return null;
       })
@@ -1135,8 +1150,10 @@ export default function Home() {
       let interim = '';
       let final = '';
       for (let i = 0; i < e.results.length; i++) {
-        const transcript = e.results[i][0].transcript;
-        if (e.results[i].isFinal) final += transcript;
+        const result = e.results[i];
+        const [topAlternative] = result;
+        const transcript = topAlternative?.transcript || '';
+        if (result.isFinal) final += transcript;
         else interim += transcript;
       }
       const best = (final || interim).trim();
@@ -1683,7 +1700,7 @@ export default function Home() {
       setOptimisticPlaying(true);
       // Always use currentSong.videoId as the source of truth — never rely on loadedVideoIdRef
       // which can be stale after navigating away and back
-      const videoId = currentSong.videoId;
+      const { videoId } = currentSong;
       if (videoId) {
         if (videoEnabled) {
           if (yt.loadedVideoIdRef.current === videoId) {
@@ -1746,7 +1763,7 @@ export default function Home() {
   useEffect(() => {
     if (!fullPlayerOpen || !currentSong || nativeAndroid || !videoEnabled) return;
     // If nothing is loaded or wrong video is loaded, reload it
-    const videoId = currentSong.videoId;
+    const { videoId } = currentSong;
     if (!videoId) return;
     if (!yt.isPlaying && yt.loadedVideoIdRef.current !== videoId) {
       yt.playVideoById(videoId);
@@ -2463,7 +2480,7 @@ export default function Home() {
             <div className="sp-header">
               <button className="sp-down-btn" onClick={() => setFullPlayerOpen(false)}>▼</button>
               <div className="sp-mode-switch">
-                <button className={!videoEnabled ? 'active' : ''} onClick={switchToAudioMode}>Audio</button>
+                <button className={videoEnabled ? '' : 'active'} onClick={switchToAudioMode}>Audio</button>
                   <button className={videoEnabled ? 'active' : ''} onClick={switchToVideoMode} disabled={nativeAndroid} title={nativeAndroid ? 'Video mode disabled on Android for stable background audio' : 'Video'}>Video</button>
               </div>
               <span style={{ width: 36 }} />
