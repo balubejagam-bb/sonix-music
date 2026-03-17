@@ -158,6 +158,7 @@ public class MusicPlayerPlugin extends Plugin {
                     ret.put("currentTime", Math.max(0L, current) / 1000.0);
                     ret.put("duration", duration > 0 ? duration / 1000.0 : 0.0);
                     ret.put("isPlaying", MusicPlaybackService.currentPlayer.isPlaying());
+                    ret.put("playbackState", MusicPlaybackService.currentPlayer.getPlaybackState());
                     call.resolve(ret);
                 } catch (Exception e) {
                     call.reject("Thread error", e);

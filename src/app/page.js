@@ -737,12 +737,18 @@ export default function Home() {
       const stateListener = NativeMusicPlayer.addListener('onStateChanged', (res) => {
         if (res) {
           yt.updateNativeTime(res.currentTime || 0, res.duration || 0);
-          if (typeof res.isPlaying === 'boolean') {
-            setNativeIsPlaying(res.isPlaying);
-            setOptimisticPlaying(false);
-          }
-          
-          // STATE_ENDED = 4 in ExoPlayer
+
+            if (typeof res.isPlaying === 'boolean') {
+              // STATE_BUFFERING = 2
+              if (res.playbackState === 2 && (optimisticPlaying || nativeShouldPlayRef.current)) {
+                 // Keep UI playing while buffering
+                 setNativeIsPlaying(true);
+              } else {
+                 setNativeIsPlaying(res.isPlaying);
+                 setOptimisticPlaying(false);
+              }
+            }
+
           if (res.playbackState === 4) {
              handleNext();
           }
@@ -785,20 +791,23 @@ export default function Home() {
           if (res && res.currentTime !== undefined) {
              yt.updateNativeTime(res.currentTime, res.duration || 0);
              if (typeof res.isPlaying === 'boolean') {
-               setNativeIsPlaying(res.isPlaying);
-               setOptimisticPlaying(false);
-             }
-          }
-        } catch (e) {}
-      }, 1000);
+                 if (res.playbackState === 2 && (optimisticPlaying || nativeShouldPlayRef.current)) {
+                    setNativeIsPlaying(true);
+                 } else {
+                    setNativeIsPlaying(res.isPlaying);
+                 }
+               }
+            }
+          } catch (e) {}
+        }, 1000);
 
-      return () => {
-        stateListener.remove();
-        actionListener.remove();
-        clearInterval(timer);
-      };
-    }
-  }, [nativeAndroid]);
+        return () => {
+          stateListener.remove();
+          actionListener.remove();
+          clearInterval(timer);
+        };
+      }
+    }, [nativeAndroid]);
 
 
   async function fetchJsonWithFallback(paths) {
@@ -1808,36 +1817,22 @@ export default function Home() {
       setVideoEnabled(false);
       return;
     }
-    if (nativeAndroid) {
-      if (videoEnabled) {
-        yt.pause();
-        const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
-        const streamUrl = await resolveAudioStreamForSong(currentSong, videoId);
-        if (streamUrl) {
-          try {
-            await NativeMusicPlayer.playQueue({
-              queue: [{
-                url: streamUrl,
-                title: currentSong.title || 'Unknown Track',
-                artist: currentSong.artist || 'Unknown Artist',
-                album: currentSong.album || 'Sonix Music',
-                artwork: currentSong.image || currentSong.thumbnail || '',
-              }],
-              index: 0,
-              shuffle: false,
-              repeatMode,
-            });
-            setNativeIsPlaying(true);
-            nativeShouldPlayRef.current = true;
-          } catch {}
-        }
-      }
-      setVideoEnabled(false);
-      return;
-    }
+    
     const resumeAt = yt.currentTime || 0;
     yt.pause();
     setVideoEnabled(false);
+
+    if (nativeAndroid) {
+      // Re-initialize native playback so queues and loading states are preserved
+      await playSongDirect(currentSong, queueRef.current?.length ? queueRef.current : null, true);
+      if (resumeAt > 0) {
+        setTimeout(() => {
+          NativeMusicPlayer.seekTo({ time: resumeAt }).catch(() => {});
+        }, 800);
+      }
+      return;
+    }
+
     const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
     const streamUrl = await resolveAudioStreamForSong(currentSong, videoId);
     if (streamUrl) {
