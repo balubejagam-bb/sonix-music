@@ -621,6 +621,10 @@ export default function Home() {
       const idx = (queueIndexRef.current + step) % q.length;
       const nextSong = q[idx];
       if (!nextSong) continue;
+      // On Android: also warm the stream cache
+      if (nativeAndroid && nextSong.videoId) {
+        fetch(`/api/yt-stream?videoId=${encodeURIComponent(nextSong.videoId)}`).catch(() => {});
+      }
       resolveSongVideoId(nextSong).catch(() => {});
     }
   }
@@ -827,14 +831,15 @@ export default function Home() {
     }
 
     try {
-      // On Android: resolve to a direct playable stream URL
+      // On Android: ALWAYS resolve to a direct stream URL and play via ExoPlayer.
+      // The YT iframe is killed by Android when the app goes to background/lock screen.
       if (nativeAndroid) {
         try {
           let streamUrl = null;
-          let videoId = song.videoId;
+          let videoId = song.videoId || null;
 
-          // If song has a JioSaavn/page URL, resolve it to a real stream
-          if (song.url) {
+          // Path 1: DB song with a direct URL (JioSaavn etc.)
+          if (song.url && /^https?:\/\//i.test(song.url)) {
             const res = await fetch(
               `/api/stream?url=${encodeURIComponent(song.url)}&title=${encodeURIComponent(song.title || '')}&artist=${encodeURIComponent(song.artist || '')}`
             );
@@ -842,16 +847,41 @@ export default function Home() {
             if (data.streamUrl) streamUrl = data.streamUrl;
           }
 
-          // If no stream yet, search YouTube with stream=true
+          // Path 2: YT song — resolve videoId first if needed, then get stream
           if (!streamUrl) {
-            const query = `${song.title || ''} ${song.artist || ''} official audio`.trim();
-            const res = await fetch(`/api/youtube-search?q=${encodeURIComponent(query)}&stream=true`);
-            const data = await res.json();
-            if (data.videoId) videoId = data.videoId;
-            if (data.streamUrl) streamUrl = data.streamUrl;
+            // Resolve videoId if we don't have one yet
+            if (!videoId) {
+              const query = `${song.title || ''} ${song.artist || ''} official audio`.trim();
+              try {
+                const res = await fetch(`/api/youtube-search?q=${encodeURIComponent(query)}`);
+                const data = await res.json();
+                if (data.videoId) videoId = data.videoId;
+              } catch {}
+            }
+
+            // Now resolve stream URL from videoId via dedicated route
+            if (videoId) {
+              try {
+                const res = await fetch(`/api/yt-stream?videoId=${encodeURIComponent(videoId)}`);
+                const data = await res.json();
+                if (data.streamUrl) streamUrl = data.streamUrl;
+              } catch {}
+            }
+
+            // Last resort: old stream=true path
+            if (!streamUrl && videoId) {
+              try {
+                const res = await fetch(`/api/youtube-search?q=${encodeURIComponent((song.title || '') + ' ' + (song.artist || ''))}&stream=true`);
+                const data = await res.json();
+                if (data.videoId) videoId = data.videoId;
+                if (data.streamUrl) streamUrl = data.streamUrl;
+              } catch {}
+            }
           }
 
           if (streamUrl) {
+            const artwork = song.thumbnail || song.image ||
+              (videoId ? `https://img.youtube.com/vi/${videoId}/mqdefault.jpg` : '');
             const songWithUrl = { ...song, url: streamUrl, videoId: videoId || song.videoId };
             const queueSource = songList || queueRef.current || [];
 
@@ -862,7 +892,7 @@ export default function Home() {
                 title: song.title || 'Unknown Track',
                 artist: song.artist || 'Unknown Artist',
                 album: song.album || 'Sonix Music',
-                artwork: song.thumbnail || song.image || (videoId ? `https://img.youtube.com/vi/${videoId}/mqdefault.jpg` : ''),
+                artwork,
               }],
               index: 0,
               shuffle: shuffleEnabled,
@@ -870,7 +900,7 @@ export default function Home() {
             });
 
             queueRef.current = queueSource.length ? queueSource : [songWithUrl];
-            queueIndexRef.current = queueSource.findIndex(s => songKey(s) === key) || 0;
+            queueIndexRef.current = Math.max(0, queueSource.findIndex(s => songKey(s) === key));
             setCurrentSong(songWithUrl);
             setNativeIsPlaying(true);
             isLoadingSongRef.current = false;
@@ -879,8 +909,23 @@ export default function Home() {
             prefetchUpcomingVideoIds();
             return;
           }
+
+          // Stream resolution failed — show error, don't fall back to iframe on Android
+          console.warn('[Android] Stream resolution failed for:', song.title);
+          isLoadingSongRef.current = false;
+          setIsLoadingSong(false);
+          setLoadingSongKey(null);
+          // Still set currentSong so UI shows the song, but it won't play in background
+          setCurrentSong({ ...song, videoId });
+          setNativeIsPlaying(false);
+          return;
+
         } catch (nativeErr) {
-          console.error('Native playback error, falling back to web:', nativeErr);
+          console.error('Native playback error:', nativeErr);
+          isLoadingSongRef.current = false;
+          setIsLoadingSong(false);
+          setLoadingSongKey(null);
+          return;
         }
       }
 
