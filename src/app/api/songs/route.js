@@ -51,7 +51,13 @@ export async function GET(request) {
     }
 
     const sortObj = sort === 'year' ? { year: -1 } : sort === 'title' ? { title: 1 } : { popularity: -1 };
-    const collections = source === 'spotify' ? ['spotify_tracks'] : source === 'jiosaavn' ? ['songs'] : ['songs', 'spotify_tracks'];
+    const collections = source === 'spotify'
+      ? ['spotify_tracks']
+      : source === 'jiosaavn'
+        ? ['songs']
+        : source === 'gaana'
+          ? ['gaana_songs']
+          : ['songs', 'spotify_tracks', 'gaana_songs'];
     const isDefaultQuery = !search && !genre && !year && !language;
     const projection = {
       title: 1,

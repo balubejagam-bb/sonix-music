@@ -31,12 +31,13 @@ async function searchDB(db, query, limit = 10) {
   const regex = new RegExp(escapeRegex(query), 'i');
   const filter = { $or: [{ title: regex }, { artist: regex }, { album: regex }] };
 
-  const [songs, spotifyTracks] = await Promise.all([
+  const [songs, spotifyTracks, gaanaSongs] = await Promise.all([
     db.collection('songs').find(filter).limit(limit).toArray(),
     db.collection('spotify_tracks').find(filter).limit(limit).toArray(),
+    db.collection('gaana_songs').find(filter).limit(limit).toArray(),
   ]);
 
-  return [...songs, ...spotifyTracks]
+  return [...songs, ...spotifyTracks, ...gaanaSongs]
     .slice(0, limit)
     .map(s => ({ ...s, _id: s._id.toString(), source: s.source || 'internal' }));
 }
