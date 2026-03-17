@@ -441,6 +441,7 @@ export default function Home() {
   const queueRef = useRef([]);
   const queueIndexRef = useRef(0);
   const playRequestIdRef = useRef(0);
+  const playStartTimeoutRef = useRef(null);
   const videoIdCacheRef = useRef(new Map());
   const streamUrlCacheRef = useRef(new Map());
   const nativeShouldPlayRef = useRef(false);
@@ -736,7 +737,9 @@ export default function Home() {
       const stateListener = NativeMusicPlayer.addListener('onStateChanged', (res) => {
         if (res) {
           yt.updateNativeTime(res.currentTime || 0, res.duration || 0);
-          setNativeIsPlaying(!!res.isPlaying);
+          if (typeof res.isPlaying === 'boolean') {
+            setNativeIsPlaying(res.isPlaying);
+          }
           
           // STATE_ENDED = 4 in ExoPlayer
           if (res.playbackState === 4) {
@@ -780,7 +783,9 @@ export default function Home() {
           const res = await NativeMusicPlayer.getPosition();
           if (res && res.currentTime !== undefined) {
              yt.updateNativeTime(res.currentTime, res.duration || 0);
-             setNativeIsPlaying(!!res.isPlaying);
+             if (typeof res.isPlaying === 'boolean') {
+               setNativeIsPlaying(res.isPlaying);
+             }
           }
         } catch (e) {}
       }, 5000);
@@ -1280,6 +1285,17 @@ export default function Home() {
     setIsLoadingSong(true);
     setLoadingSongKey(key);
 
+    if (playStartTimeoutRef.current) {
+      clearTimeout(playStartTimeoutRef.current);
+      playStartTimeoutRef.current = null;
+    }
+    playStartTimeoutRef.current = setTimeout(() => {
+      if (playRequestIdRef.current !== requestId) return;
+      isLoadingSongRef.current = false;
+      setIsLoadingSong(false);
+      setLoadingSongKey(null);
+    }, 22000);
+
     if (songList) {
       const idx = songList.findIndex(s => songKey(s) === key);
       queueRef.current = songList;
@@ -1359,39 +1375,19 @@ export default function Home() {
             const artwork = song.thumbnail || song.image || 'https://picsum.photos/seed/sonixart/200';
             const songWithUrl = { ...song, url: streamUrl, videoId: videoId || song.videoId };
             const queueSource = songList || queueRef.current || [];
-
-            // Build queue with already-known URLs so next/prev feels instant.
-            const androidQueue = queueSource.map(s => {
-              const qKey = songKey(s);
-              const qCached = streamUrlCacheRef.current.get(qKey) || localStorage.getItem(`sonix_stream_${qKey}`) || '';
-              const qUrl = songKey(s) === key ? streamUrl : (isLikelyDirectAudioUrl(s.url || '') ? s.url : qCached);
-              const itemArtwork = s.thumbnail || s.image ||
-                (s.videoId ? `https://img.youtube.com/vi/${s.videoId}/mqdefault.jpg` : '');
-              return {
-                url: qUrl,
-                title: s.title || 'Unknown Track',
-                artist: s.artist || 'Unknown Artist',
-                album: s.album || 'Sonix Music',
-                artwork: itemArtwork,
-              };
-            });
-
-            // If queue is empty, create a single-item queue
-            if (androidQueue.length === 0) {
-              androidQueue.push({
-                url: streamUrl,
-                title: song.title || 'Unknown Track',
-                artist: song.artist || 'Unknown Artist',
-                album: song.album || 'Sonix Music',
-                artwork,
-              });
-            }
+            const androidQueue = [{
+              url: streamUrl,
+              title: song.title || 'Unknown Track',
+              artist: song.artist || 'Unknown Artist',
+              album: song.album || 'Sonix Music',
+              artwork,
+            }];
 
             yt.pause();
             setVideoEnabled(false); // Native Android player is audio-only
             await NativeMusicPlayer.playQueue({
               queue: androidQueue,
-              index: Math.max(0, queueSource.findIndex(s => songKey(s) === key)),
+              index: 0,
               shuffle: shuffleEnabled,
               repeatMode,
             });
@@ -1572,6 +1568,10 @@ export default function Home() {
     } catch (e) {
       console.error('Playback error:', e);
     } finally {
+      if (playStartTimeoutRef.current && playRequestIdRef.current === requestId) {
+        clearTimeout(playStartTimeoutRef.current);
+        playStartTimeoutRef.current = null;
+      }
       // Always ensure loading is cleared
       isLoadingSongRef.current = false;
       setIsLoadingSong(false);
@@ -1985,7 +1985,9 @@ export default function Home() {
     }
   }
 
-  const activePlaying = nativeAndroid ? nativeIsPlaying : (yt.isPlaying || optimisticPlaying);
+  const activePlaying = nativeAndroid
+    ? (videoEnabled ? (yt.isPlaying || optimisticPlaying) : nativeIsPlaying)
+    : (yt.isPlaying || optimisticPlaying);
   const repeatLabel = repeatMode === 'off' ? '🔁' : repeatMode === 'one' ? '🔂' : '🔁';
 
   // Reconcile optimistic state once YT confirms
