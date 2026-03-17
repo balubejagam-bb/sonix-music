@@ -739,6 +739,7 @@ export default function Home() {
           yt.updateNativeTime(res.currentTime || 0, res.duration || 0);
           if (typeof res.isPlaying === 'boolean') {
             setNativeIsPlaying(res.isPlaying);
+            setOptimisticPlaying(false);
           }
           
           // STATE_ENDED = 4 in ExoPlayer
@@ -785,10 +786,11 @@ export default function Home() {
              yt.updateNativeTime(res.currentTime, res.duration || 0);
              if (typeof res.isPlaying === 'boolean') {
                setNativeIsPlaying(res.isPlaying);
+               setOptimisticPlaying(false);
              }
           }
         } catch (e) {}
-      }, 5000);
+      }, 1000);
 
       return () => {
         stateListener.remove();
@@ -1856,19 +1858,21 @@ export default function Home() {
       try {
         let shouldUseNative = nativeTrackLoadedRef.current || nativeIsPlaying;
         if (!shouldUseNative) {
-          const status = await NativeMusicPlayer.getStatus().catch(() => null);
+          const status = await NativeMusicPlayer.getPosition().catch(() => null);
           shouldUseNative = !!status?.currentTrack?.url || Number(status?.duration || 0) > 0;
         }
 
         if (shouldUseNative) {
-          const status = await NativeMusicPlayer.getStatus().catch(() => null);
+          const status = await NativeMusicPlayer.getPosition().catch(() => null);
           const currentlyPlaying = typeof status?.isPlaying === 'boolean' ? status.isPlaying : nativeIsPlaying;
 
           if (currentlyPlaying) {
+            setOptimisticPlaying(false);
             await NativeMusicPlayer.pause();
             setNativeIsPlaying(false);
             nativeShouldPlayRef.current = false;
           } else {
+            setOptimisticPlaying(true);
             await NativeMusicPlayer.resume();
             setNativeIsPlaying(true);
             nativeShouldPlayRef.current = true;
@@ -1925,6 +1929,8 @@ export default function Home() {
     if (!currentSong) return;
     const t = Math.max(0, timeInSeconds);
     if (nativeAndroid) {
+      // Optimistically update seek bar immediately in native mode too.
+      yt.updateNativeTime(t, yt.duration);
       NativeMusicPlayer.seekTo({ positionMs: t * 1000 }).catch(() => {});
     } else {
       yt.seekTo(t);
@@ -1986,7 +1992,7 @@ export default function Home() {
   }
 
   const activePlaying = nativeAndroid
-    ? (videoEnabled ? (yt.isPlaying || optimisticPlaying) : nativeIsPlaying)
+    ? (videoEnabled ? (yt.isPlaying || optimisticPlaying) : (nativeIsPlaying || optimisticPlaying))
     : (yt.isPlaying || optimisticPlaying);
   const repeatLabel = repeatMode === 'off' ? '🔁' : repeatMode === 'one' ? '🔂' : '🔁';
 
@@ -1994,6 +2000,12 @@ export default function Home() {
   useEffect(() => {
     setOptimisticPlaying(false);
   }, [yt.isPlaying]);
+
+  useEffect(() => {
+    if (nativeAndroid) {
+      setOptimisticPlaying(false);
+    }
+  }, [nativeAndroid, nativeIsPlaying]);
 
   // Gestures for full player
   const touchStartX = useRef(0);
