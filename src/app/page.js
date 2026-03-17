@@ -46,17 +46,49 @@ function canUseNativePlugins() {
 
 // ─────────────────────── YOUTUBE AUDIO ENGINE ───────────────────────
 function useYouTubePlayer() {
-  const playerRef = useRef(null);      // YT.Player instance
-  const containerRef = useRef(null);   // DOM div element
-  const silentAudioRef = useRef(null); // silent <audio> to anchor mediaSession on Android
-  const [ytReady, setYtReady] = useState(false);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [duration, setDuration] = useState(0);
+  const playerRef       = useRef(null);
+  const containerRef    = useRef(null);
+  const silentAudioRef  = useRef(null);
+  const [ytReady, setYtReady]         = useState(false);
+  const [isPlaying, setIsPlaying]     = useState(false);
+  const [duration, setDuration]       = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
-  const timerRef = useRef(null);
-  const onEndRef = useRef(null);
+  const timerRef        = useRef(null);
+  const timerRunning    = useRef(false);
+  const onEndRef        = useRef(null);
   const pendingVideoIdRef = useRef(null);
-  const loadedVideoIdRef = useRef(null); // tracks what videoId is currently loaded in the YT player
+  const loadedVideoIdRef  = useRef(null);
+
+  // Stable refs so event handlers inside YT.Player never go stale
+  const startTimerRef = useRef(null);
+  const stopTimerRef  = useRef(null);
+
+  function startTimer() {
+    if (timerRunning.current) return; // already running
+    timerRunning.current = true;
+    function tick() {
+      if (!timerRunning.current) return;
+      try {
+        if (playerRef.current && typeof playerRef.current.getCurrentTime === 'function') {
+          const ct = playerRef.current.getCurrentTime();
+          const d  = playerRef.current.getDuration();
+          setCurrentTime(ct || 0);
+          if (d > 0) setDuration(d);
+        }
+      } catch {}
+      timerRef.current = setTimeout(tick, 250);
+    }
+    tick();
+  }
+
+  function stopTimer() {
+    timerRunning.current = false;
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+  }
+
+  // Keep refs up to date so YT event handlers always call the latest version
+  startTimerRef.current = startTimer;
+  stopTimerRef.current  = stopTimer;
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -71,38 +103,50 @@ function useYouTubePlayer() {
       try {
         playerRef.current = new window.YT.Player(el, {
           height: '2', width: '2',
-          playerVars: { autoplay: 0, controls: 0, disablekb: 1, fs: 0, modestbranding: 1, rel: 0, playsinline: 1, origin: window.location.origin },
+          playerVars: {
+            autoplay: 0, controls: 0, disablekb: 1, fs: 0,
+            modestbranding: 1, rel: 0, playsinline: 1,
+            origin: window.location.origin,
+          },
           events: {
             onReady: () => {
               setYtReady(true);
               if (pendingVideoIdRef.current) {
-                playerRef.current.loadVideoById(pendingVideoIdRef.current);
-                playerRef.current.playVideo();
+                try {
+                  playerRef.current.loadVideoById(pendingVideoIdRef.current);
+                  playerRef.current.playVideo();
+                  loadedVideoIdRef.current = pendingVideoIdRef.current;
+                } catch {}
                 pendingVideoIdRef.current = null;
               }
             },
             onStateChange: (e) => {
-              const S = window.YT.PlayerState;
+              const S = window.YT?.PlayerState;
+              if (!S) return;
               if (e.data === S.PLAYING) {
                 setIsPlaying(true);
-                setDuration(playerRef.current.getDuration());
-                startTimer();
-                // Anchor mediaSession on Android by playing the silent audio element
-                if (silentAudioRef.current) {
-                  silentAudioRef.current.play().catch(() => {});
-                }
+                try { setDuration(playerRef.current.getDuration()); } catch {}
+                startTimerRef.current();
+                if (silentAudioRef.current) silentAudioRef.current.play().catch(() => {});
               } else if (e.data === S.PAUSED) {
                 setIsPlaying(false);
-                stopTimer();
+                stopTimerRef.current();
                 if (silentAudioRef.current) silentAudioRef.current.pause();
               } else if (e.data === S.ENDED) {
                 setIsPlaying(false);
-                stopTimer();
+                stopTimerRef.current();
                 if (silentAudioRef.current) silentAudioRef.current.pause();
                 if (onEndRef.current) onEndRef.current();
+              } else if (e.data === S.BUFFERING) {
+                // keep isPlaying true while buffering so UI doesn't flicker
+                setIsPlaying(true);
               }
             },
-            onError: () => { setIsPlaying(false); stopTimer(); },
+            onError: (e) => {
+              console.error('YT player error:', e.data);
+              setIsPlaying(false);
+              stopTimerRef.current();
+            },
           },
         });
       } catch (err) { console.error('YT player init failed:', err); }
@@ -119,76 +163,68 @@ function useYouTubePlayer() {
         document.head.appendChild(tag);
       }
     }
-    return () => stopTimer();
+
+    return () => stopTimerRef.current();
   }, []);
 
-  function startTimer() {
-    stopTimer();
-    let rafId;
-    function tick() {
-      if (playerRef.current && typeof playerRef.current.getCurrentTime === 'function') {
-        setCurrentTime(playerRef.current.getCurrentTime());
-        const d = playerRef.current.getDuration();
-        if (d > 0) setDuration(d);
-      }
-      rafId = requestAnimationFrame(tick);
-    }
-    rafId = requestAnimationFrame(tick);
-    timerRef.current = rafId;
+  function isReady() {
+    return !!(playerRef.current && typeof playerRef.current.playVideo === 'function');
   }
-  function stopTimer() {
-    if (timerRef.current) {
-      cancelAnimationFrame(timerRef.current);
-      timerRef.current = null;
-    }
-  }
-
-  function isReady() { return playerRef.current && typeof playerRef.current.playVideo === 'function'; }
 
   async function searchAndPlay(title, artist) {
     try {
-      const query = `${title} ${artist} official audio`;
-      const res = await fetch(`/api/youtube-search?q=${encodeURIComponent(query)}`);
-      const data = await res.json();
-      if (data.videoId && isReady()) {
-        playerRef.current.loadVideoById(data.videoId);
-        playerRef.current.playVideo();
-        loadedVideoIdRef.current = data.videoId;
-        return true;
-      }
-      const res2 = await fetch(`/api/youtube-search?q=${encodeURIComponent(title + ' ' + artist + ' song')}`);
-      const data2 = await res2.json();
-      if (data2.videoId && isReady()) {
-        playerRef.current.loadVideoById(data2.videoId);
-        playerRef.current.playVideo();
-        loadedVideoIdRef.current = data2.videoId;
-        return true;
-      }
-    } catch (e) { console.error('YouTube search failed:', e); }
+      const q1 = `${title} ${artist} official audio`;
+      const r1 = await fetch(`/api/youtube-search?q=${encodeURIComponent(q1)}`);
+      const d1 = await r1.json();
+      if (d1.videoId) { playVideoById(d1.videoId); return true; }
+
+      const q2 = `${title} ${artist} song`;
+      const r2 = await fetch(`/api/youtube-search?q=${encodeURIComponent(q2)}`);
+      const d2 = await r2.json();
+      if (d2.videoId) { playVideoById(d2.videoId); return true; }
+    } catch (e) { console.error('YT searchAndPlay failed:', e); }
     return false;
   }
 
-  function play() { if (isReady()) playerRef.current.playVideo(); }
-  function pause() { if (isReady()) playerRef.current.pauseVideo(); }
+  function play()  { if (isReady()) { try { playerRef.current.playVideo();  } catch {} } }
+  function pause() { if (isReady()) { try { playerRef.current.pauseVideo(); } catch {} } }
 
   function playVideoById(vId) {
     if (!vId) return false;
-    if (!isReady()) { pendingVideoIdRef.current = vId; return false; }
-    playerRef.current.loadVideoById(vId);
-    playerRef.current.playVideo();
-    loadedVideoIdRef.current = vId;
-    return true;
+    if (!isReady()) {
+      pendingVideoIdRef.current = vId;
+      return false;
+    }
+    try {
+      playerRef.current.loadVideoById(vId);
+      playerRef.current.playVideo();
+      loadedVideoIdRef.current = vId;
+      return true;
+    } catch (e) {
+      console.error('playVideoById failed:', e);
+      return false;
+    }
   }
 
-  function seekTo(t) { if (isReady()) playerRef.current.seekTo(t, true); }
-  function setVolume(v) { if (isReady()) playerRef.current.setVolume(v); }
+  function seekTo(t) {
+    if (isReady()) { try { playerRef.current.seekTo(t, true); } catch {} }
+  }
+  function setVolume(v) {
+    if (isReady()) { try { playerRef.current.setVolume(v); } catch {} }
+  }
 
   function updateNativeTime(c, d) {
     if (typeof c === 'number' && !isNaN(c)) setCurrentTime(c);
-    if (typeof d === 'number' && d > 0) setDuration(d);
+    if (typeof d === 'number' && d > 0)     setDuration(d);
   }
 
-  return { containerRef, silentAudioRef, ytReady, isPlaying, duration, currentTime, loadedVideoIdRef, searchAndPlay, playVideoById, play, pause, seekTo, setVolume, onEndRef, updateNativeTime };
+  return {
+    containerRef, silentAudioRef,
+    ytReady, isPlaying, duration, currentTime,
+    loadedVideoIdRef,
+    searchAndPlay, playVideoById, play, pause, seekTo, setVolume,
+    onEndRef, updateNativeTime,
+  };
 }
 
 // ─────────────────────── FORMAT TIME ───────────────────────
@@ -939,36 +975,24 @@ export default function Home() {
         }
       }
 
-      // Web fallback (browser / non-Android)
+      // Web path (browser / non-Android)
       const resolvedVideoId = await resolveSongVideoId(song);
-      const playableSong = resolvedVideoId && !song.videoId ? { ...song, videoId: resolvedVideoId } : song;
+      const playableSong = resolvedVideoId && !song.videoId
+        ? { ...song, videoId: resolvedVideoId }
+        : song;
 
-      // Clear loading state NOW — don't wait for YT to start playing
       setCurrentSong(playableSong);
       setNativeIsPlaying(false);
       isLoadingSongRef.current = false;
       setIsLoadingSong(false);
       setLoadingSongKey(null);
 
-      // On Android: push metadata to the native notification so buttons work for YT songs
-      if (nativeAndroid) {
-        try {
-          await NativeMusicPlayer.updateMeta({
-            title: playableSong.title || 'Unknown Track',
-            artist: playableSong.artist || 'Unknown Artist',
-            isPlaying: true,
-          });
-        } catch (e) { /* non-fatal */ }
-      }
-
+      // Play via YT player — playVideoById handles pending if not ready yet
       if (resolvedVideoId) {
-        const started = yt.playVideoById(resolvedVideoId);
-        // loadedVideoIdRef is updated inside playVideoById
-        if (!started && yt.ytReady) {
-          yt.searchAndPlay(song.title, song.artist);
-        }
+        yt.playVideoById(resolvedVideoId);
       } else {
-        yt.searchAndPlay(song.title, song.artist);
+        // No videoId at all — search by title/artist
+        yt.searchAndPlay(song.title || '', song.artist || '');
       }
 
       // Track recently played (local + persisted)
