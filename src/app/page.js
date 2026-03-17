@@ -1701,10 +1701,16 @@ export default function Home() {
                     <div className="artwork placeholder">🎵</div>
                   )}
                 </div>
+                {/* Song meta sits next to artwork on mobile */}
+                <div className="song-meta">
+                  <div className="title">{decodeHtml(currentSong.title)}</div>
+                  <div className="artist">{decodeHtml(currentSong.artist)}</div>
+                </div>
               </div>
 
               <div className="full-player-right">
-                <div className="song-meta">
+                {/* Song meta shown above progress on desktop only */}
+                <div className="song-meta desktop-only-meta">
                   <div className="title">{decodeHtml(currentSong.title)}</div>
                   <div className="artist">{decodeHtml(currentSong.artist)}</div>
                 </div>
@@ -1742,6 +1748,13 @@ export default function Home() {
                   </button>
                   <button className="icon-btn skip" onClick={handleNext}>⏭</button>
                   <button className="icon-btn" onClick={handleCycleRepeat}>{repeatLabel}</button>
+                </div>
+
+                {/* Mini visualizer row — mobile only */}
+                <div className="mobile-viz-row">
+                  <button className={`pill ${visualizer === 'waves' ? 'active' : ''}`} style={{ padding: '4px 12px', fontSize: 11 }} onClick={() => setVisualizer('waves')}>🌊</button>
+                  <button className={`pill ${visualizer === 'bars' ? 'active' : ''}`} style={{ padding: '4px 12px', fontSize: 11 }} onClick={() => setVisualizer('bars')}>📊</button>
+                  <button className={`pill ${visualizer === 'pulse' ? 'active' : ''}`} style={{ padding: '4px 12px', fontSize: 11 }} onClick={() => setVisualizer('pulse')}>💫</button>
                 </div>
               </div>
             </div>
