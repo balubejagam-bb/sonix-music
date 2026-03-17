@@ -2,8 +2,37 @@ import './globals.css';
 import { AuthProvider } from '@/lib/authContext';
 
 export const metadata = {
-  title: 'Sonix Music – Ad-Free Music Streaming',
-  description: 'Premium ad-free music player with 85,000+ songs. Background playback, offline caching, smart playlists.',
+  metadataBase: new URL('https://sonix-music.vercel.app'),
+  title: {
+    default: 'Sonix Music',
+    template: '%s | Sonix Music',
+  },
+  description: 'Sonix Music is an ad-free music streaming app with fast playback, smart playlists, and background listening support.',
+  applicationName: 'Sonix Music',
+  keywords: [
+    'Sonix Music',
+    'music streaming',
+    'ad-free music',
+    'background playback',
+    'online songs',
+    'telugu songs',
+    'spotify alternative',
+  ],
+  alternates: {
+    canonical: '/',
+  },
+  openGraph: {
+    title: 'Sonix Music',
+    description: 'Ad-free music streaming with fast playback and smart discovery.',
+    url: 'https://sonix-music.vercel.app',
+    siteName: 'Sonix Music',
+    type: 'website',
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'Sonix Music',
+    description: 'Ad-free music streaming with fast playback and smart discovery.',
+  },
 };
 
 export default function RootLayout({ children }) {
