@@ -713,12 +713,12 @@ export default function Home() {
   }
 
   const [voiceTranscript, setVoiceTranscript] = useState('');
+  const finalTranscriptRef = useRef('');
 
   function startVoiceSearch() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) { alert('Voice search not supported on this browser.'); return; }
 
-    // If already listening, stop it
     if (isListening && recognitionRef.current) {
       recognitionRef.current.stop();
       return;
@@ -726,10 +726,11 @@ export default function Home() {
 
     const recognition = new SpeechRecognition();
     recognition.lang = 'en-US';
-    recognition.interimResults = true;   // show live transcript
-    recognition.continuous = false;      // stop after first utterance (like Google)
+    recognition.interimResults = true;
+    recognition.continuous = false;
     recognition.maxAlternatives = 1;
     recognitionRef.current = recognition;
+    finalTranscriptRef.current = '';
 
     setVoiceTranscript('');
     setIsListening(true);
@@ -742,14 +743,9 @@ export default function Home() {
         if (e.results[i].isFinal) final += t;
         else interim += t;
       }
-      // Show live interim text in the overlay
-      setVoiceTranscript(final || interim);
-      if (final) {
-        // Final result — fill search and close overlay
-        setSearch(final.trim());
-        setView('search');
-        recognition.stop();
-      }
+      if (final) finalTranscriptRef.current = final.trim();
+      // Show live text in overlay
+      setVoiceTranscript(finalTranscriptRef.current || interim);
     };
 
     recognition.onerror = () => {
@@ -760,6 +756,13 @@ export default function Home() {
     recognition.onend = () => {
       setIsListening(false);
       setVoiceTranscript('');
+      // Apply the transcript to search AFTER recognition ends
+      const result = finalTranscriptRef.current;
+      if (result) {
+        setSearch(result);
+        setView('search');
+        finalTranscriptRef.current = '';
+      }
     };
 
     recognition.start();
