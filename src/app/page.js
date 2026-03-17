@@ -235,6 +235,8 @@ export default function Home() {
   const [shuffleEnabled, setShuffleEnabled] = useState(false);
   const [repeatMode, setRepeatMode] = useState('off');
   const [optimisticPlaying, setOptimisticPlaying] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef(null);
   const searchTimer = useRef(null);
 
   // Use refs for queue to avoid stale closures in next/prev
@@ -650,9 +652,10 @@ export default function Home() {
   // ───── Search ─────
   useEffect(() => {
     if (searchTimer.current) clearTimeout(searchTimer.current);
-    if (!search.trim()) { setSearchResults([]); setYtResults([]); setIsSearching(false); return; }
+    if (!search.trim()) { setSearchResults([]); setYtResults([]); setIsSearching(false); setIsSearchingYT(false); return; }
 
     setIsSearching(true);
+    setIsSearchingYT(true);
     searchTimer.current = setTimeout(async () => {
       const q = search.trim();
 
@@ -665,47 +668,74 @@ export default function Home() {
       ).slice(0, 30);
       setSearchResults(localHits);
 
-      try {
-        // Hit hybrid search API — DB + YouTube fallback in one call
-        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-        const data = await res.json();
+      // Fire DB search and YouTube search in parallel — always
+      const dbPromise = fetch(`/api/search?q=${encodeURIComponent(q)}`)
+        .then(r => r.json())
+        .catch(() => null);
 
+      const ytPromise = searchYouTubeFallback(q, true)
+        .then(d => {
+          const arr = Array.isArray(d) ? d : (d?.results || []);
+          return arr;
+        })
+        .catch(() => []);
+
+      // Update DB results as soon as they arrive
+      dbPromise.then(data => {
+        if (!data) return;
         if (data.songs?.length) setSearchResults(data.songs);
         else if (localHits.length === 0) setSearchResults([]);
+        // If the search API already returned ytResults, use them
+        if (data.ytResults?.length) setYtResults(data.ytResults);
+      }).catch(() => {});
 
-        // Always show YouTube results when available
-        if (data.ytResults?.length) {
-          setYtResults(data.ytResults);
-        } else {
-          // Auto-trigger YouTube if DB returned < 8 results
-          const totalDB = data.songs?.length || localHits.length;
-          if (totalDB < 8) {
-            setIsSearchingYT(true);
-            searchYouTubeFallback(q, true)
-              .then(d => {
-                const arr = Array.isArray(d) ? d : (d?.results || []);
-                if (arr.length) setYtResults(arr);
-              })
-              .catch(() => {})
-              .finally(() => setIsSearchingYT(false));
-          }
-        }
-      } catch {
-        // Fallback to local results only
-      }
+      // Update YT results as soon as they arrive
+      ytPromise.then(arr => {
+        if (arr.length) setYtResults(arr);
+        setIsSearchingYT(false);
+      }).catch(() => setIsSearchingYT(false));
 
+      // Wait for both before clearing main loading
+      await Promise.allSettled([dbPromise, ytPromise]);
       setIsSearching(false);
-    }, 400);
+    }, 350);
   }, [search, cachedSongs]);
 
   async function searchGlobalYT() {
     if (!search.trim()) return;
     setIsSearchingYT(true);
     try {
-      const data = await searchYouTubeFallback(search, true);
-      setYtResults(data.results || []);
+      const arr = await searchYouTubeFallback(search, true);
+      const results = Array.isArray(arr) ? arr : (arr?.results || []);
+      if (results.length) setYtResults(results);
     } catch(e) { console.error('YT Global search failed', e); }
     setIsSearchingYT(false);
+  }
+
+  function startVoiceSearch() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) { alert('Voice search not supported on this browser.'); return; }
+
+    if (isListening && recognitionRef.current) {
+      recognitionRef.current.stop();
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'en-US';
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognitionRef.current = recognition;
+
+    recognition.onstart = () => setIsListening(true);
+    recognition.onend = () => setIsListening(false);
+    recognition.onerror = () => setIsListening(false);
+    recognition.onresult = (e) => {
+      const transcript = e.results[0][0].transcript;
+      setSearch(transcript);
+      setView('search');
+    };
+    recognition.start();
   }
 
   // ───── Play song (core function) ─────
@@ -1261,6 +1291,14 @@ export default function Home() {
             {search && (
               <button style={{ background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer', fontSize: '16px' }} onClick={() => setSearch('')}>✕</button>
             )}
+            <button
+              className={`voice-search-btn ${isListening ? 'listening' : ''}`}
+              onClick={startVoiceSearch}
+              title={isListening ? 'Stop listening' : 'Voice search'}
+              aria-label="Voice search"
+            >
+              {isListening ? '⏹' : '🎤'}
+            </button>
           </div>
         </div>
 
@@ -1414,34 +1452,62 @@ export default function Home() {
               <>
                 <div className="section-header fade-in" style={{ marginTop: '20px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '20px' }}>
                   <h2>YouTube Discovery</h2>
-                  <span style={{ color: '#ff0000', fontSize: '13px', fontWeight: 'bold' }}>YT GLOBAL</span>
+                  <span style={{ color: '#ff4444', fontSize: '13px', fontWeight: 'bold' }}>
+                    {isSearchingYT ? '⏳ Loading...' : '▶ YT GLOBAL'}
+                  </span>
                 </div>
-                <div className="song-list">
-                  {ytResults.map((v, i) => (
-                    <div 
-                      key={v.videoId} 
-                      className={`song-row fade-in ${currentSong?.videoId === v.videoId ? 'playing' : ''}`}
-                      onClick={() => playSongDirect({
-                        ...v,
-                        image: v.thumbnail || `https://img.youtube.com/vi/${v.videoId}/hqdefault.jpg`,
-                        source: 'youtube',
-                      }, ytResults.map(r => ({
-                        ...r,
-                        image: r.thumbnail || `https://img.youtube.com/vi/${r.videoId}/hqdefault.jpg`,
-                        source: 'youtube',
-                      })))}
-                    >
-                      <span className="song-num">🌐</span>
-                      <img className="song-img" src={v.thumbnail} alt="" loading="lazy" />
-                      <div className="song-details">
-                        <div className="song-title">{v.title}</div>
-                        <div className="song-artist">{v.artist}</div>
+                <div className="yt-results-grid">
+                  {ytResults.map((v) => {
+                    const ytSong = {
+                      ...v,
+                      image: v.thumbnail || `https://img.youtube.com/vi/${v.videoId}/hqdefault.jpg`,
+                      source: 'youtube',
+                    };
+                    const isCurrentYT = currentSong?.videoId === v.videoId;
+                    const ytKey = v.videoId;
+                    const isLiked = likedSongs.has(ytKey);
+                    return (
+                      <div
+                        key={v.videoId}
+                        className={`yt-card ${isCurrentYT ? 'playing' : ''}`}
+                        onClick={() => playSongDirect(ytSong, ytResults.map(r => ({
+                          ...r,
+                          image: r.thumbnail || `https://img.youtube.com/vi/${r.videoId}/hqdefault.jpg`,
+                          source: 'youtube',
+                        })))}
+                      >
+                        <div className="yt-card-thumb">
+                          <img src={v.thumbnail || `https://img.youtube.com/vi/${v.videoId}/mqdefault.jpg`} alt="" loading="lazy" />
+                          <div className="yt-card-play">{isCurrentYT && activePlaying ? '⏸' : '▶'}</div>
+                          {isCurrentYT && (
+                            <div className="yt-card-eq">
+                              <span className="bar"></span><span className="bar"></span><span className="bar"></span>
+                            </div>
+                          )}
+                        </div>
+                        <div className="yt-card-info">
+                          <div className="yt-card-title">{v.title || 'YouTube Video'}</div>
+                          <div className="yt-card-artist">{v.artist || v.channelTitle || 'YouTube'}</div>
+                        </div>
+                        {user && (
+                          <button
+                            className="yt-card-like"
+                            onClick={(e) => { e.stopPropagation(); toggleLike(ytKey, ytSong); }}
+                            title={isLiked ? 'Unlike' : 'Like'}
+                          >
+                            {isLiked ? '💚' : '🤍'}
+                          </button>
+                        )}
                       </div>
-                      <div className="song-duration">YouTube</div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </>
+            )}
+            {isSearchingYT && ytResults.length === 0 && search.trim() && (
+              <div style={{ textAlign: 'center', padding: '20px', color: '#9ca3af', fontSize: 13 }}>
+                ⏳ Searching YouTube...
+              </div>
             )}
 
             {/* Global Search Trigger */}
