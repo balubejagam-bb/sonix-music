@@ -1856,14 +1856,15 @@ export default function Home() {
   async function handlePlayPauseToggle() {
     if (nativeAndroid && currentSong && !videoEnabled) {
       try {
-        let shouldUseNative = nativeTrackLoadedRef.current || nativeIsPlaying;
-        if (!shouldUseNative) {
-          const status = await NativeMusicPlayer.getPosition().catch(() => null);
-          shouldUseNative = !!status?.currentTrack?.url || Number(status?.duration || 0) > 0;
-        }
+        const status = await NativeMusicPlayer.getPosition().catch(() => null);
+        const canControlNative =
+          nativeTrackLoadedRef.current ||
+          nativeIsPlaying ||
+          typeof status?.isPlaying === 'boolean' ||
+          Number(status?.duration || 0) > 0 ||
+          Number(status?.currentTime || 0) > 0;
 
-        if (shouldUseNative) {
-          const status = await NativeMusicPlayer.getPosition().catch(() => null);
+        if (canControlNative) {
           const currentlyPlaying = typeof status?.isPlaying === 'boolean' ? status.isPlaying : nativeIsPlaying;
 
           if (currentlyPlaying) {
@@ -1876,9 +1877,16 @@ export default function Home() {
             await NativeMusicPlayer.resume();
             setNativeIsPlaying(true);
             nativeShouldPlayRef.current = true;
+            nativeTrackLoadedRef.current = true;
           }
           return;
         }
+
+        // First-open bootstrap: if native engine has no loaded track yet,
+        // start the current song directly so play/pause works immediately.
+        setOptimisticPlaying(true);
+        await playSongDirect(currentSong, queueRef.current?.length ? queueRef.current : null, true);
+        return;
       } catch (e) {
         console.error('Native play/pause failed, falling back to web toggle:', e);
       }
