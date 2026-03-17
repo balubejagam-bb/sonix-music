@@ -236,7 +236,9 @@ export default function Home() {
   const [repeatMode, setRepeatMode] = useState('off');
   const [optimisticPlaying, setOptimisticPlaying] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [voiceTranscript, setVoiceTranscript] = useState('');
   const recognitionRef = useRef(null);
+  const finalTranscriptRef = useRef('');
   const searchTimer = useRef(null);
   const ytResultsCacheRef = useRef(new Map()); // client-side cache: query → ytResults
 
@@ -731,23 +733,29 @@ export default function Home() {
     setIsSearchingYT(false);
   }
 
-  const [voiceTranscript, setVoiceTranscript] = useState('');
-  const finalTranscriptRef = useRef('');
-
+  // ───── Voice Search ─────
   function startVoiceSearch() {
+    if (typeof window === 'undefined') return;
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) { alert('Voice search not supported on this browser.'); return; }
-
-    if (isListening && recognitionRef.current) {
-      recognitionRef.current.stop();
+    if (!SpeechRecognition) {
+      alert('Voice search is not supported on this browser. Try Chrome or Edge.');
       return;
     }
+
+    // Toggle off if already listening
+    if (isListening) {
+      try { recognitionRef.current?.stop(); } catch {}
+      return;
+    }
+
+    // Clean up any previous instance
+    try { recognitionRef.current?.abort(); } catch {}
 
     const recognition = new SpeechRecognition();
     recognition.lang = 'en-US';
     recognition.interimResults = true;
     recognition.continuous = false;
-    recognition.maxAlternatives = 1;
+    recognition.maxAlternatives = 3;
     recognitionRef.current = recognition;
     finalTranscriptRef.current = '';
 
@@ -758,43 +766,48 @@ export default function Home() {
       let interim = '';
       let final = '';
       for (let i = 0; i < e.results.length; i++) {
-        const t = e.results[i][0].transcript;
-        if (e.results[i].isFinal) final += t;
-        else interim += t;
+        const transcript = e.results[i][0].transcript;
+        if (e.results[i].isFinal) final += transcript;
+        else interim += transcript;
       }
-      // Always keep the best text we have — final preferred, interim as fallback
       const best = (final || interim).trim();
-      if (best) finalTranscriptRef.current = best;
-      setVoiceTranscript(best);
+      if (best) {
+        finalTranscriptRef.current = best;
+        setVoiceTranscript(best);
+      }
     };
 
     recognition.onerror = (e) => {
-      // On no-speech, still use whatever interim we captured
-      const result = finalTranscriptRef.current;
       setIsListening(false);
       setVoiceTranscript('');
+      if (e.error === 'not-allowed' || e.error === 'permission-denied') {
+        alert('Microphone access denied. Please allow mic permission in your browser settings.');
+        return;
+      }
+      // For no-speech or other errors, still fire search if we captured anything
+      const result = finalTranscriptRef.current;
+      finalTranscriptRef.current = '';
       if (result) {
-        setSearch(result);
-        setView('search');
-        finalTranscriptRef.current = '';
+        setTimeout(() => { setSearch(result); setView('search'); }, 50);
       }
     };
 
     recognition.onend = () => {
-      const result = finalTranscriptRef.current;
       setIsListening(false);
       setVoiceTranscript('');
+      const result = finalTranscriptRef.current;
+      finalTranscriptRef.current = '';
       if (result) {
-        // Small timeout so React flushes the overlay close before setting search
-        setTimeout(() => {
-          setSearch(result);
-          setView('search');
-        }, 50);
-        finalTranscriptRef.current = '';
+        setTimeout(() => { setSearch(result); setView('search'); }, 50);
       }
     };
 
-    recognition.start();
+    try {
+      recognition.start();
+    } catch (e) {
+      setIsListening(false);
+      console.error('Voice recognition start failed:', e);
+    }
   }
 
   // ───── Play song (core function) ─────
