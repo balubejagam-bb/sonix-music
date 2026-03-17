@@ -1856,28 +1856,25 @@ export default function Home() {
   async function handlePlayPauseToggle() {
     if (nativeAndroid && currentSong && !videoEnabled) {
       try {
-        const status = await NativeMusicPlayer.getPosition().catch(() => null);
         const canControlNative =
           nativeTrackLoadedRef.current ||
           nativeIsPlaying ||
-          typeof status?.isPlaying === 'boolean' ||
-          Number(status?.duration || 0) > 0 ||
-          Number(status?.currentTime || 0) > 0;
+          optimisticPlaying;
 
         if (canControlNative) {
-          const currentlyPlaying = typeof status?.isPlaying === 'boolean' ? status.isPlaying : nativeIsPlaying;
+          const currentlyPlaying = nativeIsPlaying || optimisticPlaying;
 
           if (currentlyPlaying) {
             setOptimisticPlaying(false);
-            await NativeMusicPlayer.pause();
             setNativeIsPlaying(false);
             nativeShouldPlayRef.current = false;
+            await NativeMusicPlayer.pause();
           } else {
             setOptimisticPlaying(true);
-            await NativeMusicPlayer.resume();
             setNativeIsPlaying(true);
             nativeShouldPlayRef.current = true;
             nativeTrackLoadedRef.current = true;
+            await NativeMusicPlayer.resume();
           }
           return;
         }
@@ -1958,7 +1955,8 @@ export default function Home() {
     const rect = e.currentTarget.getBoundingClientRect();
     const x = getEventX(e);
     const pct = Math.max(0, Math.min(1, (x - rect.left) / rect.width));
-    const t = pct * (yt.duration || 0);
+    const durationForSeek = yt.duration > 0 ? yt.duration : Math.max(0, Number(currentSong?.duration || 0));
+    const t = pct * durationForSeek;
     handleSeek(t);
   }
 
@@ -2002,6 +2000,7 @@ export default function Home() {
   const activePlaying = nativeAndroid
     ? (videoEnabled ? (yt.isPlaying || optimisticPlaying) : (nativeIsPlaying || optimisticPlaying))
     : (yt.isPlaying || optimisticPlaying);
+  const durationForUi = yt.duration > 0 ? yt.duration : Math.max(0, Number(currentSong?.duration || 0));
   const repeatLabel = repeatMode === 'off' ? '🔁' : repeatMode === 'one' ? '🔂' : '🔁';
 
   // Reconcile optimistic state once YT confirms
@@ -2032,7 +2031,8 @@ export default function Home() {
     if (!targetEl || !currentSong) return;
     const rect = targetEl.getBoundingClientRect();
     const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    const t = pct * (yt.duration || 0);
+    const durationForSeek = yt.duration > 0 ? yt.duration : Math.max(0, Number(currentSong?.duration || 0));
+    const t = pct * durationForSeek;
     handleSeek(t);
   }
 
@@ -2679,10 +2679,11 @@ export default function Home() {
                   onClick={(e) => { e.stopPropagation(); seekFromBarEvent(e); }}
                   onMouseDown={(e) => { e.stopPropagation(); startSeekDrag(e); }}
                   onTouchStart={(e) => { e.stopPropagation(); startSeekDrag(e); }}
+                  onTouchEnd={(e) => { e.stopPropagation(); e.preventDefault(); seekFromBarEvent(e); }}
                 >
-                  <div className="progress-filled" style={{ width: yt.duration ? `${(yt.currentTime / yt.duration) * 100}%` : '0%' }}></div>
+                  <div className="progress-filled" style={{ width: durationForUi ? `${(yt.currentTime / durationForUi) * 100}%` : '0%' }}></div>
                 </div>
-                <span className="time">{fmt(yt.duration)}</span>
+                <span className="time">{fmt(durationForUi)}</span>
               </div>
             </div>
 
@@ -2790,12 +2791,12 @@ export default function Home() {
                 onTouchStart={startSeekDrag}
                 onTouchEnd={(e) => { e.preventDefault(); seekFromBarEvent(e); }}
               >
-                <div className="sp-progress-fill" style={{ width: yt.duration ? `${(yt.currentTime / yt.duration) * 100}%` : '0%' }} />
-                <div className="sp-progress-thumb" style={{ left: yt.duration ? `${(yt.currentTime / yt.duration) * 100}%` : '0%' }} />
+                <div className="sp-progress-fill" style={{ width: durationForUi ? `${(yt.currentTime / durationForUi) * 100}%` : '0%' }} />
+                <div className="sp-progress-thumb" style={{ left: durationForUi ? `${(yt.currentTime / durationForUi) * 100}%` : '0%' }} />
               </div>
               <div className="sp-times">
                 <span>{fmt(yt.currentTime)}</span>
-                <span>{fmt(yt.duration)}</span>
+                <span>{fmt(durationForUi)}</span>
               </div>
             </div>
 
