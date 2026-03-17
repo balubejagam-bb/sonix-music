@@ -1,7 +1,14 @@
 'use client';
 import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { Capacitor } from '@capacitor/core';
 
 const AuthContext = createContext(null);
+
+function apiPath(path) {
+  if (typeof path !== 'string' || !path.startsWith('/')) return path;
+  const nativeAndroid = Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
+  return nativeAndroid ? `https://sonix-music.vercel.app${path}` : path;
+}
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
@@ -11,9 +18,18 @@ export function AuthProvider({ children }) {
   const [userPlaylists, setUserPlaylists] = useState([]);
 
   useEffect(() => {
+    try {
+      const likedCache = localStorage.getItem('sonix_liked_ids');
+      const playlistsCache = localStorage.getItem('sonix_user_playlists');
+      const likedObjects = localStorage.getItem('sonix_liked_objects');
+      if (likedCache) setLikedSongs(new Set(JSON.parse(likedCache)));
+      if (playlistsCache) setUserPlaylists(JSON.parse(playlistsCache));
+      if (likedObjects) setLikedSongObjects(JSON.parse(likedObjects));
+    } catch {}
+
     const token = localStorage.getItem('sonix_token');
     if (token) {
-      fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } })
+      fetch(apiPath('/api/auth/me'), { headers: { Authorization: `Bearer ${token}` } })
         .then(r => r.json())
         .then(data => {
           if (data.user) {
@@ -33,9 +49,10 @@ export function AuthProvider({ children }) {
 
   const fetchLikedSongs = async (token) => {
     try {
-      const res = await fetch('/api/user/liked', { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(apiPath('/api/user/liked'), { headers: { Authorization: `Bearer ${token}` } });
       const data = await res.json();
       setLikedSongs(new Set(data.likedSongs || []));
+      try { localStorage.setItem('sonix_liked_ids', JSON.stringify(data.likedSongs || [])); } catch {}
       // Also restore full song objects from localStorage if available
       try {
         const saved = localStorage.getItem('sonix_liked_objects');
@@ -46,9 +63,10 @@ export function AuthProvider({ children }) {
 
   const fetchUserPlaylists = async (token) => {
     try {
-      const res = await fetch('/api/playlist', { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(apiPath('/api/playlist'), { headers: { Authorization: `Bearer ${token}` } });
       const data = await res.json();
       setUserPlaylists(data.playlists || []);
+      try { localStorage.setItem('sonix_user_playlists', JSON.stringify(data.playlists || [])); } catch {}
     } catch {}
   };
 
@@ -73,7 +91,7 @@ export function AuthProvider({ children }) {
       });
     }
     try {
-      await fetch(`/api/user/like/${encodeURIComponent(songId)}`, {
+      await fetch(apiPath(`/api/user/like/${encodeURIComponent(songId)}`), {
         method: isLiked ? 'DELETE' : 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -100,7 +118,7 @@ export function AuthProvider({ children }) {
   const createPlaylist = useCallback(async (name) => {
     const token = localStorage.getItem('sonix_token');
     if (!token) return null;
-    const res = await fetch('/api/playlist', {
+    const res = await fetch(apiPath('/api/playlist'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({ name }),
@@ -118,7 +136,7 @@ export function AuthProvider({ children }) {
     const token = localStorage.getItem('sonix_token');
     if (!token) return false;
     try {
-      const res = await fetch(`/api/playlist/${playlistId}`, {
+      const res = await fetch(apiPath(`/api/playlist/${playlistId}`), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ action: 'add', songId }),
@@ -128,7 +146,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   const login = async (email, password) => {
-    const res = await fetch('/api/auth/login', {
+    const res = await fetch(apiPath('/api/auth/login'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
@@ -143,7 +161,7 @@ export function AuthProvider({ children }) {
   };
 
   const register = async (name, email, password) => {
-    const res = await fetch('/api/auth/register', {
+    const res = await fetch(apiPath('/api/auth/register'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, email, password }),
@@ -156,9 +174,11 @@ export function AuthProvider({ children }) {
   };
 
   const logout = async () => {
-    await fetch('/api/auth/logout', { method: 'POST' });
+    await fetch(apiPath('/api/auth/logout'), { method: 'POST' });
     localStorage.removeItem('sonix_token');
     localStorage.removeItem('sonix_liked_objects');
+    localStorage.removeItem('sonix_liked_ids');
+    localStorage.removeItem('sonix_user_playlists');
     setUser(null);
     setLikedSongs(new Set());
     setLikedSongObjects([]);

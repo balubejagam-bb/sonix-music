@@ -46,6 +46,22 @@ export async function GET(request) {
 
     const sortObj = sort === 'year' ? { year: -1 } : sort === 'title' ? { title: 1 } : { popularity: -1 };
     const collections = source === 'spotify' ? ['spotify_tracks'] : source === 'jiosaavn' ? ['songs'] : ['songs', 'spotify_tracks'];
+    const projection = {
+      title: 1,
+      artist: 1,
+      album: 1,
+      duration: 1,
+      thumbnail: 1,
+      image: 1,
+      songId: 1,
+      videoId: 1,
+      url: 1,
+      source: 1,
+      popularity: 1,
+      genre: 1,
+      year: 1,
+      lang: 1,
+    };
 
     const skip = (page - 1) * limit;
     const collectionResults = await Promise.all(
@@ -54,8 +70,8 @@ export async function GET(request) {
         const [count, docs] = await Promise.all([
           collection.countDocuments(query),
           all
-            ? collection.find(query).sort(sortObj).toArray()
-            : collection.find(query).sort(sortObj).skip(skip).limit(limit).toArray(),
+            ? collection.find(query, { projection }).sort(sortObj).toArray()
+            : collection.find(query, { projection }).sort(sortObj).skip(skip).limit(limit).toArray(),
         ]);
         return { count, docs };
       })

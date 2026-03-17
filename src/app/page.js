@@ -13,6 +13,12 @@ function isNativeAndroid() {
   return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
 }
 
+function clientApiPath(path) {
+  if (typeof path !== 'string') return path;
+  if (!path.startsWith('/')) return path;
+  return isNativeAndroid() ? `https://sonix-music.vercel.app${path}` : path;
+}
+
 // Ensure BackgroundMode doesn't crash SSR or Capacitor init
 let BackgroundMode = null;
 async function getBackgroundMode() {
@@ -232,12 +238,12 @@ function useYouTubePlayer() {
     try {
       const suffix = type === 'podcast' ? '' : ' official audio';
       const q1 = `${title} ${artist}${suffix}`.trim();
-      const r1 = await fetch(`/api/youtube-search?q=${encodeURIComponent(q1)}`);
+      const r1 = await fetch(clientApiPath(`/api/youtube-search?q=${encodeURIComponent(q1)}`));
       const d1 = await r1.json();
       if (d1.videoId) { playVideoById(d1.videoId); return true; }
 
       const q2 = `${title} ${artist} song`.trim();
-      const r2 = await fetch(`/api/youtube-search?q=${encodeURIComponent(q2)}`);
+      const r2 = await fetch(clientApiPath(`/api/youtube-search?q=${encodeURIComponent(q2)}`));
       const d2 = await r2.json();
       if (d2.videoId) { playVideoById(d2.videoId); return true; }
     } catch (e) { console.error('YT searchAndPlay failed:', e); }
@@ -398,21 +404,25 @@ export default function Home() {
   const queueRef = useRef([]);
   const queueIndexRef = useRef(0);
   const videoIdCacheRef = useRef(new Map());
+  const streamUrlCacheRef = useRef(new Map());
   const pendingVideoIdRef = useRef(new Map());
   const controlsBoundRef = useRef(false);
   const nativeControlsEnabledRef = useRef(true);
   const lastNativeTrackKeyRef = useRef(null);
   const nativeAndroid = isNativeAndroid();
-  const API_ORIGIN = nativeAndroid ? 'https://sonix-music.vercel.app' : '';
 
   function apiPath(path) {
-    if (typeof path !== 'string') return path;
-    if (!path.startsWith('/')) return path;
-    return `${API_ORIGIN}${path}`;
+    return clientApiPath(path);
   }
 
   function canPlayNatively(song) {
     return nativeAndroid && typeof song?.url === 'string' && /^https?:\/\//i.test(song.url);
+  }
+
+  function isLikelyDirectAudioUrl(url = '') {
+    if (!/^https?:\/\//i.test(url)) return false;
+    return /\.(mp3|m4a|aac|ogg|flac|wav)(\?|$)/i.test(url) ||
+      /media|cdn|stream|audio|saavncdn|jiosaavn/i.test(url);
   }
 
   function buildNativeQueue(sourceQueue = [], selectedSong = null) {
@@ -475,9 +485,27 @@ export default function Home() {
         } catch(e) { console.error('Background init failed:', e); }
       }
 
+      // Hydrate quickly from local cache for lag-free first paint on mobile.
+      try {
+        const cachedRaw = localStorage.getItem('sonix_cache');
+        if (cachedRaw) {
+          const cached = JSON.parse(cachedRaw);
+          if (Array.isArray(cached) && cached.length) {
+            setCachedSongs(cached);
+            setSongs(cached.slice(0, nativeAndroid ? 25 : 50));
+            setTotalSongs(cached.length);
+            setLoading(false);
+          }
+        }
+      } catch {}
+
       loadPlaylists();
       loadSongs(1);
-      backgroundCache();
+      if (nativeAndroid) {
+        setTimeout(() => { backgroundCache(); }, 3500);
+      } else {
+        backgroundCache();
+      }
 
       try {
         const saved = localStorage.getItem('sonix_recent');
@@ -784,8 +812,9 @@ export default function Home() {
   async function loadSongs(p, options = {}) {
     setLoading(true);
     try {
+      const pageSize = nativeAndroid ? 25 : 50;
       const params = new URLSearchParams({
-        page: p, limit: 50,
+        page: p, limit: pageSize,
         ...(options.search && { search: options.search }),
         ...(options.genre && { genre: options.genre }),
         ...(options.source && options.source !== 'all' && { source: options.source }),
@@ -1104,8 +1133,19 @@ export default function Home() {
           let streamUrl = null;
           let videoId = song.videoId || null;
 
-          // Path 1: DB song with a direct URL (JioSaavn etc.)
-          if (song.url && /^https?:\/\//i.test(song.url)) {
+          // Fast path 0: reuse resolved stream from in-memory/local cache
+          const cachedStream = streamUrlCacheRef.current.get(key) || localStorage.getItem(`sonix_stream_${key}`);
+          if (cachedStream && /^https?:\/\//i.test(cachedStream)) {
+            streamUrl = cachedStream;
+          }
+
+          // Fast path 1: play direct audio URLs immediately (true Exo behavior)
+          if (!streamUrl && isLikelyDirectAudioUrl(song.url || '')) {
+            streamUrl = song.url;
+          }
+
+          // Path 1: resolve page URLs/non-direct links only when needed
+          if (!streamUrl && song.url && /^https?:\/\//i.test(song.url)) {
             const res = await fetch(
               apiPath(`/api/stream?url=${encodeURIComponent(song.url)}&title=${encodeURIComponent(song.title || '')}&artist=${encodeURIComponent(song.artist || '')}`)
             );
@@ -1147,19 +1187,22 @@ export default function Home() {
           }
 
           if (streamUrl) {
+            streamUrlCacheRef.current.set(key, streamUrl);
+            try { localStorage.setItem(`sonix_stream_${key}`, streamUrl); } catch {}
+
             const artwork = song.thumbnail || song.image || 'https://picsum.photos/seed/sonixart/200';
             const songWithUrl = { ...song, url: streamUrl, videoId: videoId || song.videoId };
             const queueSource = songList || queueRef.current || [];
 
-            // Build the full queue for Android with stream URLs
+            // Build queue with already-known URLs so next/prev feels instant.
             const androidQueue = queueSource.map(s => {
-              // For each song in the queue, we need to get its stream URL
-              // For now, we'll use the current song's stream URL and placeholder URLs for others
-              // The web side will handle actual queue navigation via handleNext/handlePrev
+              const qKey = songKey(s);
+              const qCached = streamUrlCacheRef.current.get(qKey) || localStorage.getItem(`sonix_stream_${qKey}`) || '';
+              const qUrl = songKey(s) === key ? streamUrl : (isLikelyDirectAudioUrl(s.url || '') ? s.url : qCached);
               const itemArtwork = s.thumbnail || s.image ||
                 (s.videoId ? `https://img.youtube.com/vi/${s.videoId}/mqdefault.jpg` : '');
               return {
-                url: songKey(s) === key ? streamUrl : '', // Only current song has real URL
+                url: qUrl,
                 title: s.title || 'Unknown Track',
                 artist: s.artist || 'Unknown Artist',
                 album: s.album || 'Sonix Music',
@@ -1186,6 +1229,12 @@ export default function Home() {
               shuffle: shuffleEnabled,
               repeatMode,
             });
+
+            await NativeMusicPlayer.updateMeta({
+              title: songWithUrl.title || 'Unknown Track',
+              artist: songWithUrl.artist || 'Unknown Artist',
+              isPlaying: true,
+            }).catch(() => {});
 
             queueRef.current = queueSource.length ? queueSource : [songWithUrl];
             queueIndexRef.current = Math.max(0, queueSource.findIndex(s => songKey(s) === key));
@@ -1230,20 +1279,24 @@ export default function Home() {
         if (videoEnabled) {
           yt.playVideoById(vId);
         } else {
-          try {
-            const res = await fetch(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(vId)}`));
-            const data = await res.json();
-            if (data?.streamUrl) {
-              yt.playStream(data.streamUrl);
-            } else {
-              yt.playVideoById(vId);
-            }
-          } catch {
+          const streamUrl = await resolveAudioStreamForSong(playableSong, vId);
+          if (streamUrl) {
+            yt.playStream(streamUrl);
+          } else {
             yt.playVideoById(vId);
           }
         }
       } else {
-        yt.searchAndPlay(song.title || '', song.artist || '');
+        const fallbackVideoId = await resolveSongVideoId(playableSong);
+        if (fallbackVideoId) {
+          const nextSong = { ...playableSong, videoId: fallbackVideoId };
+          setCurrentSong(nextSong);
+          const streamUrl = await resolveAudioStreamForSong(nextSong, fallbackVideoId);
+          if (streamUrl) yt.playStream(streamUrl);
+          else yt.playVideoById(fallbackVideoId);
+        } else {
+          yt.searchAndPlay(song.title || '', song.artist || '');
+        }
       }
 
       isLoadingSongRef.current = false;
@@ -1313,7 +1366,7 @@ export default function Home() {
       navigator.mediaSession.playbackState = yt.isPlaying ? 'playing' : 'paused';
     }
     // Keep Android notification play/pause icon in sync for YT songs
-    if (nativeAndroid && currentSong.videoId) {
+    if (nativeAndroid && currentSong) {
       NativeMusicPlayer.updateMeta({
         title: currentSong.title || 'Unknown Track',
         artist: currentSong.artist || 'Unknown Artist',
@@ -1450,8 +1503,43 @@ export default function Home() {
     }
   }
 
+  async function resolveAudioStreamForSong(song, videoId) {
+    if (!song) return null;
+
+    if (song.url && /^https?:\/\//i.test(song.url)) {
+      try {
+        const res = await fetch(
+          apiPath(`/api/stream?url=${encodeURIComponent(song.url)}&title=${encodeURIComponent(song.title || '')}&artist=${encodeURIComponent(song.artist || '')}`)
+        );
+        const data = await res.json();
+        if (data?.streamUrl) return data.streamUrl;
+      } catch {}
+    }
+
+    if (videoId) {
+      try {
+        const res = await fetch(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(videoId)}`));
+        const data = await res.json();
+        if (data?.streamUrl) return data.streamUrl;
+      } catch {}
+    }
+
+    try {
+      const q = `${song.title || ''} ${song.artist || ''}`.trim();
+      if (q) {
+        const res = await fetch(apiPath(`/api/youtube-search?q=${encodeURIComponent(q)}&stream=true`));
+        const data = await res.json();
+        if (data?.streamUrl) return data.streamUrl;
+      }
+    } catch {}
+
+    return null;
+  }
+
   async function switchToVideoMode() {
-    if (!currentSong?.videoId) return;
+    if (!currentSong) return;
+    const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
+    if (!videoId) return;
     const resumeAt = yt.currentTime || 0;
     const a = yt.audioElement;
     if (a && a.src && a.src !== window.location.href) {
@@ -1459,28 +1547,34 @@ export default function Home() {
       a.src = '';
     }
     setVideoEnabled(true);
-    yt.playVideoById(currentSong.videoId);
+    yt.playVideoById(videoId);
+    if (!currentSong.videoId) setCurrentSong(prev => prev ? { ...prev, videoId } : prev);
     if (resumeAt > 0) {
       setTimeout(() => yt.seekTo(resumeAt), 350);
     }
   }
 
   async function switchToAudioMode() {
-    if (!currentSong?.videoId) {
+    if (!currentSong) {
       setVideoEnabled(false);
       return;
     }
     const resumeAt = yt.currentTime || 0;
     yt.pause();
     setVideoEnabled(false);
-    try {
-      const res = await fetch(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(currentSong.videoId)}`));
-      const data = await res.json();
-      if (data?.streamUrl) {
-        yt.playStream(data.streamUrl);
-        if (resumeAt > 0) setTimeout(() => yt.seekTo(resumeAt), 120);
-      }
-    } catch {}
+    const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
+    const streamUrl = await resolveAudioStreamForSong(currentSong, videoId);
+    if (streamUrl) {
+      yt.playStream(streamUrl);
+      if (resumeAt > 0) setTimeout(() => yt.seekTo(resumeAt), 120);
+      if (videoId && !currentSong.videoId) setCurrentSong(prev => prev ? { ...prev, videoId } : prev);
+      return;
+    }
+
+    if (videoId) {
+      yt.playVideoById(videoId);
+      if (!currentSong.videoId) setCurrentSong(prev => prev ? { ...prev, videoId } : prev);
+    }
   }
 
   async function handlePlayPauseToggle() {
@@ -1488,9 +1582,19 @@ export default function Home() {
       try {
         if (nativeIsPlaying) {
           await NativeMusicPlayer.pause();
+          await NativeMusicPlayer.updateMeta({
+            title: currentSong.title || 'Unknown Track',
+            artist: currentSong.artist || 'Unknown Artist',
+            isPlaying: false,
+          }).catch(() => {});
           setNativeIsPlaying(false);
         } else {
           await NativeMusicPlayer.resume();
+          await NativeMusicPlayer.updateMeta({
+            title: currentSong.title || 'Unknown Track',
+            artist: currentSong.artist || 'Unknown Artist',
+            isPlaying: true,
+          }).catch(() => {});
           setNativeIsPlaying(true);
         }
       } catch (e) {
@@ -1521,18 +1625,21 @@ export default function Home() {
           if (a && a.src && a.src !== window.location.href) {
             yt.play();
           } else {
-            try {
-              const res = await fetch(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(videoId)}`));
-              const data = await res.json();
-              if (data?.streamUrl) yt.playStream(data.streamUrl);
-              else yt.playVideoById(videoId);
-            } catch {
-              yt.playVideoById(videoId);
-            }
+            const streamUrl = await resolveAudioStreamForSong(currentSong, videoId);
+            if (streamUrl) yt.playStream(streamUrl);
+            else yt.playVideoById(videoId);
           }
         }
       } else {
-        yt.searchAndPlay(currentSong.title, currentSong.artist, currentSong.type || 'song');
+        const fallbackVideoId = await resolveSongVideoId(currentSong);
+        if (fallbackVideoId) {
+          const streamUrl = await resolveAudioStreamForSong(currentSong, fallbackVideoId);
+          if (streamUrl) yt.playStream(streamUrl);
+          else yt.playVideoById(fallbackVideoId);
+          setCurrentSong(prev => prev ? { ...prev, videoId: fallbackVideoId } : prev);
+        } else {
+          yt.searchAndPlay(currentSong.title, currentSong.artist, currentSong.type || 'song');
+        }
       }
     }
   }
@@ -2281,7 +2388,7 @@ export default function Home() {
       </div>
       {/* Hidden YouTube player mount point — ref-based, no ID conflict */}
       <div
-        className={`yt-video-container ${videoEnabled ? 'visible' : ''} ${fullPlayerOpen ? 'in-full' : ''}`}
+        className={`yt-video-container ${videoEnabled ? 'visible' : ''} ${videoEnabled && fullPlayerOpen ? 'in-full' : ''}`}
         aria-hidden={!videoEnabled}
       >
         <div ref={yt.containerRef} style={{ width: '100%', height: '100%' }} id="yt-player-placeholder" />
