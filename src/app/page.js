@@ -425,6 +425,8 @@ export default function Home() {
   const playRequestIdRef = useRef(0);
   const videoIdCacheRef = useRef(new Map());
   const streamUrlCacheRef = useRef(new Map());
+  const nativeShouldPlayRef = useRef(false);
+  const nativeLastResumeAtRef = useRef(0);
   const pendingVideoIdRef = useRef(new Map());
   const controlsBoundRef = useRef(false);
   const nativeControlsEnabledRef = useRef(true);
@@ -544,8 +546,12 @@ export default function Home() {
         const bg = await getBackgroundMode();
         if (bg) bg.enable();
 
-        if (nativeAndroid && currentSong && !nativeIsPlaying) {
-          NativeMusicPlayer.resume().catch(() => {});
+        if (nativeAndroid && currentSong && nativeShouldPlayRef.current && !nativeIsPlaying) {
+          const now = Date.now();
+          if (now - nativeLastResumeAtRef.current > 3000) {
+            nativeLastResumeAtRef.current = now;
+            NativeMusicPlayer.resume().catch(() => {});
+          }
         }
         
         // If we are playing a video in the foreground, it will likely pause.
@@ -573,7 +579,7 @@ export default function Home() {
         }
       } else {
         console.log('[Sonix] App foregrounded. Syncing states.');
-        if (optimisticPlaying || yt.isPlaying || nativeIsPlaying) {
+        if (!nativeAndroid && (optimisticPlaying || yt.isPlaying || nativeIsPlaying)) {
           if (yt.silentAudioRef.current && yt.silentAudioRef.current.paused) {
             yt.silentAudioRef.current.play().catch(() => {});
           }
@@ -585,19 +591,23 @@ export default function Home() {
     
     const watchdog = setInterval(() => {
       // Logic for background persistence
-      const shouldBePlaying = nativeAndroid ? (nativeIsPlaying || optimisticPlaying) : optimisticPlaying;
+      const shouldBePlaying = nativeAndroid ? nativeShouldPlayRef.current : optimisticPlaying;
       const isActuallyPlaying = nativeAndroid ? nativeIsPlaying : yt.isPlaying;
       
       if (shouldBePlaying) {
-        // 1. Ensure silent track is ALWAYS playing as an anchor
-        if (yt.silentAudioRef.current && yt.silentAudioRef.current.paused) {
+        // 1. Ensure silent track is ALWAYS playing as an anchor (web only)
+        if (!nativeAndroid && yt.silentAudioRef.current && yt.silentAudioRef.current.paused) {
           yt.silentAudioRef.current.play().catch(() => {});
         }
 
         // 2. Re-poke main engine if it dropped
         if (!isActuallyPlaying && currentSong) {
           if (nativeAndroid) {
-            NativeMusicPlayer.resume().catch(() => {}); 
+            const now = Date.now();
+            if (now - nativeLastResumeAtRef.current > 3500) {
+              nativeLastResumeAtRef.current = now;
+              NativeMusicPlayer.resume().catch(() => {});
+            }
           } else {
             yt.play();
           }
@@ -677,10 +687,12 @@ export default function Home() {
         else if (res.action === 'play') {
           NativeMusicPlayer.resume().catch(() => {});
           setNativeIsPlaying(true);
+          nativeShouldPlayRef.current = true;
         }
         else if (res.action === 'pause') {
           NativeMusicPlayer.pause().catch(() => {});
           setNativeIsPlaying(false);
+          nativeShouldPlayRef.current = false;
         }
       });
 
@@ -1293,6 +1305,7 @@ export default function Home() {
             queueIndexRef.current = Math.max(0, queueSource.findIndex(s => songKey(s) === key));
             setCurrentSong(songWithUrl);
             setNativeIsPlaying(true);
+            nativeShouldPlayRef.current = true;
             isLoadingSongRef.current = false;
             setIsLoadingSong(false);
             setLoadingSongKey(null);
@@ -1308,6 +1321,7 @@ export default function Home() {
           // Still set currentSong so UI shows the song, but it won't play in background
           setCurrentSong({ ...song, videoId });
           setNativeIsPlaying(false);
+          nativeShouldPlayRef.current = false;
           return;
 
         } catch (nativeErr) {
@@ -1596,8 +1610,9 @@ export default function Home() {
   async function switchToVideoMode() {
     if (!currentSong) return;
     if (nativeAndroid) {
-      await NativeMusicPlayer.pause().catch(() => {});
-      setNativeIsPlaying(false);
+      // Keep Android on native audio path for stable background/lockscreen playback.
+      setVideoEnabled(false);
+      return;
     }
     const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
     if (!videoId) return;
@@ -1617,6 +1632,10 @@ export default function Home() {
 
   async function switchToAudioMode() {
     if (!currentSong) {
+      setVideoEnabled(false);
+      return;
+    }
+    if (nativeAndroid) {
       setVideoEnabled(false);
       return;
     }
@@ -1649,6 +1668,7 @@ export default function Home() {
             isPlaying: false,
           }).catch(() => {});
           setNativeIsPlaying(false);
+          nativeShouldPlayRef.current = false;
         } else {
           await NativeMusicPlayer.resume();
           await NativeMusicPlayer.updateMeta({
@@ -1657,6 +1677,7 @@ export default function Home() {
             isPlaying: true,
           }).catch(() => {});
           setNativeIsPlaying(true);
+          nativeShouldPlayRef.current = true;
         }
       } catch (e) {
         console.error('Native play/pause failed:', e);
@@ -2454,7 +2475,7 @@ export default function Home() {
               <button className="sp-down-btn" onClick={() => setFullPlayerOpen(false)}>▼</button>
               <div className="sp-mode-switch">
                 <button className={!videoEnabled ? 'active' : ''} onClick={switchToAudioMode}>Audio</button>
-                <button className={videoEnabled ? 'active' : ''} onClick={switchToVideoMode}>Video</button>
+                  <button className={videoEnabled ? 'active' : ''} onClick={switchToVideoMode} disabled={nativeAndroid} title={nativeAndroid ? 'Video mode disabled on Android for stable background audio' : 'Video'}>Video</button>
               </div>
               <span style={{ width: 36 }} />
             </div>
