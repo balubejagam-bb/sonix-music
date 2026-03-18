@@ -445,7 +445,9 @@ export default function Home() {
   const videoIdCacheRef = useRef(new Map());
   const streamUrlCacheRef = useRef(new Map());
   const nativeShouldPlayRef = useRef(false);
+  const optimisticPlayingRef = useRef(false);
   const nativeLastResumeAtRef = useRef(0);
+  const trackSwitchAtRef = useRef(0);
   const pendingVideoIdRef = useRef(new Map());
   const controlsBoundRef = useRef(false);
   const nativeControlsEnabledRef = useRef(true);
@@ -456,6 +458,14 @@ export default function Home() {
 
   function apiPath(path) {
     return clientApiPath(path);
+  }
+
+  function shouldApplyNativeProgress(nextCurrentTime) {
+    if (typeof nextCurrentTime !== 'number') return true;
+    const withinSwitchWindow = Date.now() - trackSwitchAtRef.current < 1500;
+    if (!withinSwitchWindow) return true;
+    // Ignore carry-over progress from the previous track during handoff.
+    return nextCurrentTime <= 4;
   }
 
   function sleep(ms) {
@@ -747,10 +757,12 @@ export default function Home() {
           const nextDuration = typeof res.duration === 'number' && res.duration > 0
             ? res.duration
             : undefined;
-          yt.updateNativeTime(nextCurrentTime, nextDuration);
+          if (shouldApplyNativeProgress(nextCurrentTime)) {
+            yt.updateNativeTime(nextCurrentTime, nextDuration);
+          }
 
           if (typeof res.isPlaying === 'boolean') {
-            const shouldKeepPlayingUi = nativeShouldPlayRef.current || optimisticPlaying;
+            const shouldKeepPlayingUi = nativeShouldPlayRef.current || optimisticPlayingRef.current;
 
             // STATE_BUFFERING = 2, keep controls in playing state while startup/buffer happens.
             if (res.playbackState === 2 && shouldKeepPlayingUi) {
@@ -820,9 +832,11 @@ export default function Home() {
              const nextDuration = typeof res.duration === 'number' && res.duration > 0
                ? res.duration
                : undefined;
-             yt.updateNativeTime(nextCurrentTime, nextDuration);
+             if (shouldApplyNativeProgress(nextCurrentTime)) {
+               yt.updateNativeTime(nextCurrentTime, nextDuration);
+             }
              if (typeof res.isPlaying === 'boolean') {
-               if (res.playbackState === 2 && (optimisticPlaying || nativeShouldPlayRef.current)) {
+               if (res.playbackState === 2 && (optimisticPlayingRef.current || nativeShouldPlayRef.current)) {
                  setNativeIsPlaying(true);
                  setOptimisticPlaying(true);
                } else if (res.isPlaying) {
@@ -1331,6 +1345,10 @@ export default function Home() {
     const isStale = () => requestId !== playRequestIdRef.current;
 
     const key = songKey(song);
+    const previousKey = currentSong ? songKey(currentSong) : null;
+    if (previousKey !== key) {
+      trackSwitchAtRef.current = Date.now();
+    }
     setIsLoadingSong(true);
     setLoadingSongKey(key);
 
@@ -1747,9 +1765,10 @@ export default function Home() {
   }
 
   function handleVolume(v) {
-    setVolumeState(v);
+    const safe = Math.max(0, Math.min(100, Number(v) || 0));
+    setVolumeState(safe);
     if (!nativeAndroid) {
-      yt.setVolume(v);
+      yt.setVolume(safe);
     }
   }
 
@@ -2023,6 +2042,10 @@ export default function Home() {
     : (yt.isPlaying || optimisticPlaying);
   const durationForUi = yt.duration > 0 ? yt.duration : Math.max(0, Number(currentSong?.duration || 0));
   const repeatLabel = repeatMode === 'off' ? '🔁' : repeatMode === 'one' ? '🔂' : '🔁';
+
+  useEffect(() => {
+    optimisticPlayingRef.current = optimisticPlaying;
+  }, [optimisticPlaying]);
 
   // Reconcile optimistic state once YT confirms
   useEffect(() => {
