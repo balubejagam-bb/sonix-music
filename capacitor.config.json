@@ -4,7 +4,7 @@
   "webDir": "out",
   "server": {
     "androidScheme": "https",
-    "url": "http://192.168.0.105:3000",
+    "url": "${DEV_SERVER_URL:-https://sonix-music.vercel.app}",
     "cleartext": true
   },
   "plugins": {

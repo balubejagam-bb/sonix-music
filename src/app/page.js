@@ -399,21 +399,51 @@ function GlobalErrorHandler() {
     const handleGlobalError = (event) => {
       const msg = event.message?.toLowerCase() || '';
       const reason = event.reason?.message?.toLowerCase() || '';
-      const isConnectionError = msg.includes('could not establish connection') || reason.includes('could not establish connection');
+      const stack = (event.error?.stack || event.reason?.stack || '').toLowerCase();
+      
+      // Suppress harmless chrome extension/service worker errors
+      const isExtensionError = 
+        msg.includes('could not establish connection') ||
+        reason.includes('could not establish connection') ||
+        stack.includes('chrome-extension://') ||
+        msg.includes('receiving end does not exist') ||
+        reason.includes('receiving end does not exist');
 
-      if (isConnectionError) {
-        console.warn('[Sonix] Suppressed a harmless browser extension error.');
-        event.preventDefault();
-        event.stopImmediatePropagation();
+      if (isExtensionError) {
+        // Silently suppress — don't log
+        try {  event.preventDefault?.(); } catch {}
+        try { event.stopImmediatePropagation?.(); } catch {}
       }
     };
 
-    window.addEventListener('error', handleGlobalError, true);
-    window.addEventListener('unhandledrejection', handleGlobalError, true);
+    const handleDOMContentError = (event) => {
+      const target = event.target || {};
+      const listenerOptions = target.__proto__?.toString();
+      // Suppress passive listener warnings
+      if (event.type?.includes('passive') || event.message?.includes('preventDefault')) {
+        try { event.preventDefault?.(); } catch {}
+      }
+    };
+
+    // Use { capture: true } to intercept at capture phase before other handlers
+    window.addEventListener('error', handleGlobalError, { capture: true, passive: false });
+    window.addEventListener('unhandledrejection', handleGlobalError, { capture: true, passive: false });
+    
+    // Suppress passive event listener warnings
+    if (document) {
+      const origAdd = EventTarget.prototype.addEventListener;
+      EventTarget.prototype.addEventListener = function(type, listener, options) {
+        // Convert passive events that preventDefault to non-passive
+        if (typeof options === 'object' && options.passive === true) {
+          options = { ...options, passive: false };
+        }
+        return origAdd.call(this, type, listener, options);
+      };
+    }
 
     return () => {
-      window.removeEventListener('error', handleGlobalError, true);
-      window.removeEventListener('unhandledrejection', handleGlobalError, true);
+      window.removeEventListener('error', handleGlobalError, { capture: true, passive: false });
+      window.removeEventListener('unhandledrejection', handleGlobalError, { capture: true, passive: false });
     };
   }, []);
 
@@ -1047,7 +1077,6 @@ export default function Home() {
   async function searchYouTubeFallback(query, multi = false) {
     const endpoints = [
       `/api/youtube-search?q=${encodeURIComponent(query)}${multi ? '&multi=true' : ''}`,
-      `/api/youtube-search?q=${encodeURIComponent(query)}&type=video${multi ? '&multi=true' : ''}`,
     ];
     return fetchJsonWithFallback(endpoints);
   }
@@ -1222,8 +1251,13 @@ export default function Home() {
       });
       const res = await fetch(apiPath(`/api/podcasts?${params}`));
       const data = await res.json();
-      if (p === 1) { setPodcasts(data.podcasts || []); }
-      else { setPodcasts(prev => [...prev, ...(data.podcasts || [])]); }
+      const normalized = (data.podcasts || []).map((pod) => ({
+        ...pod,
+        type: pod.type || 'podcast',
+        source: pod.source || 'podcast',
+      }));
+      if (p === 1) { setPodcasts(normalized); }
+      else { setPodcasts(prev => [...prev, ...normalized]); }
       setTotalPodcasts(data.total || 0);
       setPage(p);
     } catch (e) { console.error('Failed to load podcasts', e); }
@@ -1232,6 +1266,12 @@ export default function Home() {
 
   function songKey(song) {
     return song.songId || song._id || song.videoId || `${song.title || ''}::${song.artist || ''}`;
+  }
+
+  function isPodcastItem(song) {
+    const type = String(song?.type || '').toLowerCase();
+    const source = String(song?.source || '').toLowerCase();
+    return type === 'podcast' || source === 'podcast';
   }
 
   async function resolveSongVideoId(song) {
@@ -1265,8 +1305,9 @@ export default function Home() {
       return pendingVideoIdRef.current.get(key);
     }
 
-    const suffix = song.type === 'podcast' || song.source === 'podcast' ? '' : ' official audio';
-    const query = `${song.title || ''} ${song.artist || ''}${suffix}`.trim();
+    const query = isPodcastItem(song)
+      ? `${song.title || ''} ${song.artist || ''} podcast episode`.trim()
+      : `${song.title || ''} ${song.artist || ''} official audio`.trim();
     const task = searchYouTubeFallback(query)
       .then(data => {
         const candidate = typeof data?.videoId === 'string' ? data.videoId.trim() : '';
@@ -1573,20 +1614,32 @@ export default function Home() {
 
           // Path 1: resolve page URLs/non-direct links only when needed
           if (!streamUrl && song.url && /^https?:\/\//i.test(song.url)) {
+            const streamParams = new URLSearchParams();
+            streamParams.set('url', song.url);
+            streamParams.set('title', song.title || '');
+            streamParams.set('artist', song.artist || '');
+            streamParams.set('type', isPodcastItem(song) ? 'podcast' : 'song');
+            streamParams.set('source', song.source || (isPodcastItem(song) ? 'podcast' : 'songs'));
+            if (isPodcastItem(song)) streamParams.set('strict', 'true');
             const data = await fetchJsonWithTimeout(
-              apiPath(`/api/stream?url=${encodeURIComponent(song.url)}&title=${encodeURIComponent(song.title || '')}&artist=${encodeURIComponent(song.artist || '')}`),
+              apiPath(`/api/stream?${streamParams.toString()}`),
               12000
             );
             if (isStale()) return;
             if (data.streamUrl) streamUrl = data.streamUrl;
           }
 
+          if (!streamUrl && isPodcastItem(song)) {
+            throw new Error('podcast_strict_stream_unresolved');
+          }
+
           // Path 2: YT song — resolve videoId first if needed, then get stream
           if (!streamUrl) {
             // Resolve videoId if we don't have one yet
             if (!videoId) {
-              const suffix = song.type === 'podcast' || song.source === 'podcast' ? '' : ' official audio';
-              const query = `${song.title || ''} ${song.artist || ''}${suffix}`.trim();
+              const query = isPodcastItem(song)
+                ? `${song.title || ''} ${song.artist || ''} podcast episode`.trim()
+                : `${song.title || ''} ${song.artist || ''} official audio`.trim();
               try {
                 const data = await fetchJsonWithTimeout(apiPath(`/api/youtube-search?q=${encodeURIComponent(query)}`), 12000);
                 if (isStale()) return;
@@ -1619,28 +1672,52 @@ export default function Home() {
 
           if (streamUrl) {
             if (isStale()) return;
-            streamUrlCacheRef.current.set(key, streamUrl);
-            try { localStorage.setItem(`sonix_stream_${key}`, streamUrl); } catch {}
+            // For podcasts: ALWAYS use stream URL, never fall back to video for native playback
+            if (isPodcastItem(song)) {
+              streamUrlCacheRef.current.set(key, streamUrl);
+              try { localStorage.setItem(`sonix_stream_${key}`, streamUrl); } catch {}
 
-            const artwork = song.thumbnail || song.image || 'https://picsum.photos/seed/sonixart/200';
-            const songWithUrl = { ...song, url: streamUrl, videoId: videoId || song.videoId };
-            const queueSource = songList || queueRef.current || [];
-            const androidQueue = [{
-              url: streamUrl,
-              title: song.title || 'Unknown Track',
-              artist: song.artist || 'Unknown Artist',
-              album: song.album || 'Sonix Music',
-              artwork,
-            }];
+              const artwork = song.thumbnail || song.image || 'https://picsum.photos/seed/sonixart/200';
+              const songWithUrl = { ...song, url: streamUrl, videoId: null }; // Explicitly null videoId for podcasts
+              const queueSource = songList || queueRef.current || [];
+              const androidQueue = [{
+                url: streamUrl,
+                title: song.title || 'Unknown Track',
+                artist: song.artist || 'Unknown Artist',
+                album: song.album || 'Sonix Music',
+                artwork,
+              }];
 
-            yt.pause();
-            await enforceEngineLock('native-audio');
-            await NativeMusicPlayer.playQueue({
-              queue: androidQueue,
-              index: 0,
-              shuffle: shuffleEnabled,
-              repeatMode,
-            });
+              yt.pause();
+              await enforceEngineLock('native-audio');
+              await NativeMusicPlayer.playQueue({
+                queue: androidQueue,
+                index: 0,
+              });
+            } else {
+              streamUrlCacheRef.current.set(key, streamUrl);
+              try { localStorage.setItem(`sonix_stream_${key}`, streamUrl); } catch {}
+
+              const artwork = song.thumbnail || song.image || 'https://picsum.photos/seed/sonixart/200';
+              const songWithUrl = { ...song, url: streamUrl, videoId: videoId || song.videoId };
+              const queueSource = songList || queueRef.current || [];
+              const androidQueue = [{
+                url: streamUrl,
+                title: song.title || 'Unknown Track',
+                artist: song.artist || 'Unknown Artist',
+                album: song.album || 'Sonix Music',
+                artwork,
+              }];
+
+              yt.pause();
+              await enforceEngineLock('native-audio');
+              await NativeMusicPlayer.playQueue({
+                queue: androidQueue,
+                index: 0,
+                shuffle: shuffleEnabled,
+                repeatMode,
+              });
+            }
             if (isStale()) return;
 
             // Verify native player actually started.
@@ -1746,6 +1823,13 @@ export default function Home() {
             await enforceEngineLock('web-audio');
             yt.playStream(streamUrl, vId);
             activeEngineRef.current = 'web-audio';
+          } else if (isPodcastItem(playableSong)) {
+            console.warn('Podcast stream unavailable from dataset URL; skipping video fallback.');
+            setOptimisticPlaying(false);
+            isLoadingSongRef.current = false;
+            setIsLoadingSong(false);
+            setLoadingSongKey(null);
+            return;
           } else {
             await enforceEngineLock('web-video');
             yt.playVideoById(vId);
@@ -1753,6 +1837,22 @@ export default function Home() {
           }
         }
       } else {
+        if (isPodcastItem(playableSong)) {
+          const streamUrl = await resolveAudioStreamForSong(playableSong, null);
+          if (isStale()) return;
+          if (streamUrl) {
+            await enforceEngineLock('web-audio');
+            yt.playStream(streamUrl, null);
+            activeEngineRef.current = 'web-audio';
+          } else {
+            console.warn('Podcast stream unavailable from dataset URL; skipping search fallback.');
+            setOptimisticPlaying(false);
+            isLoadingSongRef.current = false;
+            setIsLoadingSong(false);
+            setLoadingSongKey(null);
+            return;
+          }
+        } else {
         const fallbackVideoId = await resolveSongVideoId(playableSong);
         if (isStale()) return;
         if (fallbackVideoId) {
@@ -1774,6 +1874,7 @@ export default function Home() {
           await enforceEngineLock('web-video');
           yt.searchAndPlay(songForWeb.title || '', songForWeb.artist || '');
           activeEngineRef.current = 'web-video';
+        }
         }
       }
 
@@ -1983,16 +2084,26 @@ export default function Home() {
 
   async function resolveAudioStreamForSong(song, videoId) {
     if (!song) return null;
+    const podcastMode = isPodcastItem(song);
 
     if (song.url && /^https?:\/\//i.test(song.url)) {
       try {
+        const params = new URLSearchParams();
+        params.set('url', song.url);
+        params.set('title', song.title || '');
+        params.set('artist', song.artist || '');
+        params.set('type', podcastMode ? 'podcast' : 'song');
+        params.set('source', song.source || (podcastMode ? 'podcast' : 'songs'));
+        if (podcastMode) params.set('strict', 'true');
         const data = await fetchJsonWithTimeout(
-          apiPath(`/api/stream?url=${encodeURIComponent(song.url)}&title=${encodeURIComponent(song.title || '')}&artist=${encodeURIComponent(song.artist || '')}`),
+          apiPath(`/api/stream?${params.toString()}`),
           nativeAndroid ? 14000 : 10000
         );
         if (data?.streamUrl) return data.streamUrl;
       } catch {}
     }
+
+    if (podcastMode) return null;
 
     if (videoId) {
       try {
@@ -2729,6 +2840,7 @@ export default function Home() {
 
           <div className="song-list">
             {(view === 'podcasts' ? podcasts : activeSongs).map((song, i) => {
+              const queueSource = view === 'podcasts' ? podcasts : activeSongs;
               const key = song.songId || song._id || song.videoId || `${song.title || ''}::${song.artist || ''}`;
               const isLiked = likedSongs.has(key);
               const isCurrentSong = currentSong && songKey(currentSong) === key;
@@ -2737,7 +2849,7 @@ export default function Home() {
                 key={song._id || song.songId || song.videoId || i}
                 className={`song-row fade-in ${isCurrentSong ? 'playing' : ''}`}
                 style={{ animationDelay: `${Math.min(i * 15, 200)}ms` }}
-                onClick={() => playSongDirect(song, activeSongs)}
+                onClick={() => playSongDirect(song, queueSource)}
               >
                 <span className="song-num">
                   {loadingSongKey === key ? (
