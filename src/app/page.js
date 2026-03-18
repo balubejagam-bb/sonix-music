@@ -1897,7 +1897,6 @@ export default function Home() {
         : songForWeb;
 
       const vId = normalizeVideoId(playableSong.videoId) || resolvedVideoId;
-      const preferIframePlayback = nativeAndroid;
       setCurrentSong(playableSong);
       setNativeIsPlaying(false);
       nativeTrackLoadedRef.current = false;
@@ -1905,7 +1904,7 @@ export default function Home() {
       
       // Audio-first UX: only load iframe video when user explicitly chooses Video mode.
       if (vId) {
-        if (videoEnabled || (preferIframePlayback && !isPodcastItem(playableSong))) {
+        if (videoEnabled && !isPodcastItem(playableSong)) {
           await enforceEngineLock('web-video');
           yt.playVideoById(vId);
           activeEngineRef.current = 'web-video';
@@ -1918,9 +1917,11 @@ export default function Home() {
             if (started) {
               activeEngineRef.current = 'web-audio';
             } else {
-              await enforceEngineLock('web-video');
-              yt.playVideoById(vId);
-              activeEngineRef.current = 'web-video';
+              setOptimisticPlaying(false);
+              isLoadingSongRef.current = false;
+              setIsLoadingSong(false);
+              setLoadingSongKey(null);
+              return;
             }
           } else if (isPodcastItem(playableSong)) {
             console.warn('Podcast stream unavailable from dataset URL; skipping video fallback.');
@@ -1930,9 +1931,11 @@ export default function Home() {
             setLoadingSongKey(null);
             return;
           } else {
-            await enforceEngineLock('web-video');
-            yt.playVideoById(vId);
-            activeEngineRef.current = 'web-video';
+            setOptimisticPlaying(false);
+            isLoadingSongRef.current = false;
+            setIsLoadingSong(false);
+            setLoadingSongKey(null);
+            return;
           }
         }
       } else {
@@ -1960,31 +1963,31 @@ export default function Home() {
           const streamUrl = await resolveAudioStreamForSong(nextSong, fallbackVideoId);
           if (isStale()) return;
           if (streamUrl) {
-            if (preferIframePlayback) {
-              await enforceEngineLock('web-video');
-              yt.playVideoById(fallbackVideoId);
-              activeEngineRef.current = 'web-video';
+            await enforceEngineLock('web-audio');
+            const started = await yt.playStream(streamUrl, fallbackVideoId);
+            if (started) {
+              activeEngineRef.current = 'web-audio';
             } else {
-              await enforceEngineLock('web-audio');
-              const started = await yt.playStream(streamUrl, fallbackVideoId);
-              if (started) {
-                activeEngineRef.current = 'web-audio';
-              } else {
-                await enforceEngineLock('web-video');
-                yt.playVideoById(fallbackVideoId);
-                activeEngineRef.current = 'web-video';
-              }
+              setOptimisticPlaying(false);
+              isLoadingSongRef.current = false;
+              setIsLoadingSong(false);
+              setLoadingSongKey(null);
+              return;
             }
           }
           else {
-            await enforceEngineLock('web-video');
-            yt.playVideoById(fallbackVideoId);
-            activeEngineRef.current = 'web-video';
+            setOptimisticPlaying(false);
+            isLoadingSongRef.current = false;
+            setIsLoadingSong(false);
+            setLoadingSongKey(null);
+            return;
           }
         } else {
-          await enforceEngineLock('web-video');
-          yt.searchAndPlay(songForWeb.title || '', songForWeb.artist || '');
-          activeEngineRef.current = 'web-video';
+          setOptimisticPlaying(false);
+          isLoadingSongRef.current = false;
+          setIsLoadingSong(false);
+          setLoadingSongKey(null);
+          return;
         }
         }
       }
@@ -2373,11 +2376,9 @@ export default function Home() {
       return;
     }
 
-    // Keep playback alive by falling back to video when stream cannot be resolved.
-    setVideoEnabled(true);
-    await enforceEngineLock('web-video');
-    yt.playVideoById(videoId);
-    activeEngineRef.current = 'web-video';
+    // Stay in audio mode if stream cannot be resolved; do not auto-switch back to video.
+    setOptimisticPlaying(false);
+    activeEngineRef.current = 'none';
   }
 
 
