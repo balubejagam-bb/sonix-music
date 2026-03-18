@@ -7,11 +7,13 @@
     "build": "next build",
     "start": "next start",
     "seed": "node scripts/seed.js",
+    "verify:android-playback": "node scripts/verify-android-playback-checklist.js",
     "postinstall": "patch-package"
   },
   "dependencies": {
     "@anuradev/capacitor-background-mode": "^7.2.1",
     "@capacitor/android": "^8.2.0",
+    "@capacitor/app": "^8.0.1",
     "@capacitor/cli": "^8.2.0",
     "@capacitor/core": "^8.2.0",
     "@capacitor/local-notifications": "^8.0.2",

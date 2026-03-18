@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { Capacitor, registerPlugin } from '@capacitor/core';
+import { App } from '@capacitor/app';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { useAuth } from '@/lib/authContext';
 import AuthModal from '@/components/AuthModal';
@@ -126,6 +127,9 @@ function useYouTubePlayer() {
         
         // Secondary audio element for direct streams (to bypass YT iframe limitations)
         const a = new Audio();
+        a.preload = 'auto';
+        a.crossOrigin = 'anonymous';
+        a.playsInline = true;
         a.volume = 0.8;
         a.onplay = () => setIsPlaying(true);
         a.onpause = () => setIsPlaying(false);
@@ -304,7 +308,18 @@ function useYouTubePlayer() {
     pause(); // stop YT
     const a = playerRef.current_audio;
     if (a) {
-      a.src = url;
+      const currentSrc = a.currentSrc || a.src || '';
+      let sameSource = currentSrc === url;
+      if (!sameSource) {
+        try {
+          const normalizedCurrent = new URL(currentSrc, window.location.href).href;
+          const normalizedNext = new URL(url, window.location.href).href;
+          sameSource = normalizedCurrent === normalizedNext;
+        } catch {}
+      }
+      if (!sameSource) {
+        a.src = url;
+      }
       a.play().catch(e => {
         console.warn('Audio play failed, fallback to YT:', e);
       });
@@ -454,6 +469,13 @@ export default function Home() {
   const lastNativeTrackKeyRef = useRef(null);
   const lastNativeActionRef = useRef({ action: '', at: 0 });
   const nativeTrackLoadedRef = useRef(false);
+  const activeEngineRef = useRef('none'); // none | native-audio | web-audio | web-video
+  const nativeFailureRef = useRef({
+    failures: 0,
+    lastFailureAt: 0,
+    backoffUntil: 0,
+    cooldownUntil: 0,
+  });
   const nativeAndroid = isNativeAndroid();
 
   function apiPath(path) {
@@ -470,6 +492,67 @@ export default function Home() {
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function nowMs() {
+    return Date.now();
+  }
+
+  function canAttemptNativePlayback() {
+    const now = nowMs();
+    const st = nativeFailureRef.current;
+    if (st.cooldownUntil > now) return false;
+    if (st.backoffUntil > now) return false;
+    return true;
+  }
+
+  function registerNativeFailure(reason = 'unknown') {
+    const now = nowMs();
+    const st = nativeFailureRef.current;
+    const withinWindow = now - st.lastFailureAt < 120000;
+    const failures = withinWindow ? st.failures + 1 : 1;
+    const backoffMs = Math.min(1500 * Math.pow(2, Math.max(0, failures - 1)), 20000);
+    const cooldownUntil = failures >= 4 ? now + 90000 : st.cooldownUntil;
+
+    nativeFailureRef.current = {
+      failures,
+      lastFailureAt: now,
+      backoffUntil: now + backoffMs,
+      cooldownUntil,
+    };
+
+    console.warn('[Android] Native playback failure registered', {
+      reason,
+      failures,
+      backoffMs,
+      cooldownActive: cooldownUntil > now,
+    });
+  }
+
+  function registerNativeSuccess() {
+    nativeFailureRef.current = {
+      failures: 0,
+      lastFailureAt: 0,
+      backoffUntil: 0,
+      cooldownUntil: 0,
+    };
+  }
+
+  async function enforceEngineLock(targetEngine) {
+    if (activeEngineRef.current === targetEngine) return;
+
+    if (targetEngine === 'native-audio') {
+      yt.pause();
+      activeEngineRef.current = targetEngine;
+      return;
+    }
+
+    if (nativeAndroid && (nativeTrackLoadedRef.current || nativeIsPlaying || nativeShouldPlayRef.current)) {
+      await NativeMusicPlayer.pause().catch(() => {});
+    }
+    setNativeIsPlaying(false);
+    nativeShouldPlayRef.current = false;
+    activeEngineRef.current = targetEngine;
   }
 
   async function fetchJsonWithTimeout(url, timeoutMs = 10000) {
@@ -661,8 +744,45 @@ export default function Home() {
         }
       }
     };
+
+    const handleAppState = async ({ isActive }) => {
+      if (!nativeAndroid) return;
+      if (!isActive) {
+        console.log('[Sonix] Native app backgrounded. Ensuring playback stability.');
+        const bg = await getBackgroundMode();
+        if (bg) bg.enable();
+
+        if (
+          currentSong &&
+          nativeTrackLoadedRef.current &&
+          nativeShouldPlayRef.current &&
+          !nativeIsPlaying
+        ) {
+          const now = Date.now();
+          if (now - nativeLastResumeAtRef.current > 3000) {
+            nativeLastResumeAtRef.current = now;
+            NativeMusicPlayer.resume().catch(() => {});
+          }
+        }
+      } else {
+        console.log('[Sonix] Native app foregrounded. Syncing states.');
+      }
+    };
     
     document.addEventListener('visibilitychange', handleVisibility);
+    let appStateListener = null;
+    let disposed = false;
+    if (nativeAndroid) {
+      App.addListener('appStateChange', handleAppState)
+        .then((listener) => {
+          if (disposed) {
+            listener.remove().catch(() => {});
+          } else {
+            appStateListener = listener;
+          }
+        })
+        .catch(() => {});
+    }
     
     const watchdog = setInterval(() => {
       // Logic for background persistence
@@ -695,7 +815,11 @@ export default function Home() {
     }, 2000);
 
     return () => {
+      disposed = true;
       document.removeEventListener('visibilitychange', handleVisibility);
+      if (appStateListener) {
+        appStateListener.remove().catch(() => {});
+      }
       clearInterval(watchdog);
     };
   }, [currentSong, nativeIsPlaying, optimisticPlaying, yt.isPlaying]);
@@ -1381,9 +1505,18 @@ export default function Home() {
       // On Android: use native ExoPlayer only for Audio mode.
       // Keep Video mode on web/YT path so users can use video playback intentionally.
       if (nativeAndroid && !videoEnabled) {
+        if (!canAttemptNativePlayback()) {
+          forceWebFallback = true;
+        }
+
         try {
           let streamUrl = null;
           let videoId = song.videoId || null;
+
+          if (forceWebFallback) {
+            console.warn('[Android] Native playback skipped due to active backoff/cooldown policy.');
+            throw new Error('native_backoff_active');
+          }
 
           // Fast path 0: reuse resolved stream from in-memory/local cache
           const cachedStream = streamUrlCacheRef.current.get(key) || localStorage.getItem(`sonix_stream_${key}`);
@@ -1459,6 +1592,7 @@ export default function Home() {
             }];
 
             yt.pause();
+            await enforceEngineLock('native-audio');
             await NativeMusicPlayer.playQueue({
               queue: androidQueue,
               index: 0,
@@ -1484,6 +1618,7 @@ export default function Home() {
 
             if (!nativeReady) {
               console.warn('[Android] Native player did not start via ExoPlayer.');
+              registerNativeFailure('native_not_ready');
               nativeTrackLoadedRef.current = false;
               setNativeIsPlaying(false);
               nativeShouldPlayRef.current = false;
@@ -1498,12 +1633,14 @@ export default function Home() {
             if (forceWebFallback) {
               // Continue into web/YT fallback path below.
             } else {
+            registerNativeSuccess();
             queueRef.current = queueSource.length ? queueSource : [songWithUrl];
             queueIndexRef.current = Math.max(0, queueSource.findIndex(s => songKey(s) === key));
             setCurrentSong(songWithUrl);
             setNativeIsPlaying(true);
             nativeTrackLoadedRef.current = true;
             nativeShouldPlayRef.current = true;
+            activeEngineRef.current = 'native-audio';
             isLoadingSongRef.current = false;
             setIsLoadingSong(false);
             setLoadingSongKey(null);
@@ -1514,6 +1651,7 @@ export default function Home() {
 
           // Stream resolution failed — fall back to web/YT playback path.
           console.warn('[Android] Native stream resolution failed for ExoPlayer:', song.title);
+          registerNativeFailure('stream_resolution_failed');
           androidFallbackSong = { ...song, videoId: videoId || song.videoId || null };
           setCurrentSong(androidFallbackSong);
           setNativeIsPlaying(false);
@@ -1527,6 +1665,7 @@ export default function Home() {
 
         } catch (nativeErr) {
           console.error('Native playback error:', nativeErr);
+          registerNativeFailure(nativeErr?.message || 'native_exception');
           nativeTrackLoadedRef.current = false;
           nativeShouldPlayRef.current = false;
           setNativeIsPlaying(false);
@@ -1555,14 +1694,20 @@ export default function Home() {
       // Audio-first UX: only load iframe video when user explicitly chooses Video mode.
       if (vId) {
         if (videoEnabled) {
+          await enforceEngineLock('web-video');
           yt.playVideoById(vId);
+          activeEngineRef.current = 'web-video';
         } else {
           const streamUrl = await resolveAudioStreamForSong(playableSong, vId);
           if (isStale()) return;
           if (streamUrl) {
+            await enforceEngineLock('web-audio');
             yt.playStream(streamUrl);
+            activeEngineRef.current = 'web-audio';
           } else {
+            await enforceEngineLock('web-video');
             yt.playVideoById(vId);
+            activeEngineRef.current = 'web-video';
           }
         }
       } else {
@@ -1573,10 +1718,20 @@ export default function Home() {
           setCurrentSong(nextSong);
           const streamUrl = await resolveAudioStreamForSong(nextSong, fallbackVideoId);
           if (isStale()) return;
-          if (streamUrl) yt.playStream(streamUrl);
-          else yt.playVideoById(fallbackVideoId);
+          if (streamUrl) {
+            await enforceEngineLock('web-audio');
+            yt.playStream(streamUrl);
+            activeEngineRef.current = 'web-audio';
+          }
+          else {
+            await enforceEngineLock('web-video');
+            yt.playVideoById(fallbackVideoId);
+            activeEngineRef.current = 'web-video';
+          }
         } else {
+          await enforceEngineLock('web-video');
           yt.searchAndPlay(songForWeb.title || '', songForWeb.artist || '');
+          activeEngineRef.current = 'web-video';
         }
       }
 
@@ -1835,8 +1990,10 @@ export default function Home() {
 
         setNativeIsPlaying(false);
         nativeShouldPlayRef.current = false;
+        await enforceEngineLock('web-video');
         setVideoEnabled(true);
         yt.playVideoById(targetVideoId);
+        activeEngineRef.current = 'web-video';
         if (resumeAt > 0) {
           setTimeout(() => yt.seekTo(resumeAt), 350);
         }
@@ -1847,9 +2004,11 @@ export default function Home() {
       } catch {}
       nativeShouldPlayRef.current = false;
       setNativeIsPlaying(false);
+      await enforceEngineLock('web-video');
       setVideoEnabled(true);
       yt.pause();
       yt.playVideoById(targetVideoId);
+      activeEngineRef.current = 'web-video';
       if (!currentSong.videoId) setCurrentSong(prev => prev ? { ...prev, videoId: targetVideoId } : prev);
       return;
     }
@@ -1862,7 +2021,9 @@ export default function Home() {
       a.src = '';
     }
     setVideoEnabled(true);
+    await enforceEngineLock('web-video');
     yt.playVideoById(videoId);
+    activeEngineRef.current = 'web-video';
     if (!currentSong.videoId) setCurrentSong(prev => prev ? { ...prev, videoId } : prev);
     if (resumeAt > 0) {
       setTimeout(() => yt.seekTo(resumeAt), 350);
@@ -1884,7 +2045,7 @@ export default function Home() {
       await playSongDirect(currentSong, queueRef.current?.length ? queueRef.current : null, true);
       if (resumeAt > 0) {
         setTimeout(() => {
-          NativeMusicPlayer.seekTo({ time: resumeAt }).catch(() => {});
+          NativeMusicPlayer.seekTo({ positionMs: resumeAt * 1000 }).catch(() => {});
         }, 800);
       }
       return;
@@ -1893,14 +2054,18 @@ export default function Home() {
     const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
     const streamUrl = await resolveAudioStreamForSong(currentSong, videoId);
     if (streamUrl) {
+      await enforceEngineLock('web-audio');
       yt.playStream(streamUrl);
+      activeEngineRef.current = 'web-audio';
       if (resumeAt > 0) setTimeout(() => yt.seekTo(resumeAt), 120);
       if (videoId && !currentSong.videoId) setCurrentSong(prev => prev ? { ...prev, videoId } : prev);
       return;
     }
 
     if (videoId) {
+      await enforceEngineLock('web-video');
       yt.playVideoById(videoId);
+      activeEngineRef.current = 'web-video';
       if (!currentSong.videoId) setCurrentSong(prev => prev ? { ...prev, videoId } : prev);
     }
   }
