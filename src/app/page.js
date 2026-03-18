@@ -982,7 +982,7 @@ export default function Home() {
           }
         }
       }
-    }, 2000);
+    }, 4000);
 
     return () => {
       disposed = true;
@@ -1212,7 +1212,7 @@ export default function Home() {
              }
             }
           } catch (e) {}
-        }, 1000);
+        }, 2500);
 
         return () => {
           stateListener.remove();
@@ -1837,20 +1837,29 @@ export default function Home() {
             });
             if (isStale()) return;
 
-            // Verify native player actually started.
+            // Optimistically mark native playback started to reduce first-play delay.
+            registerNativeSuccess();
+            queueRef.current = queueSource.length ? queueSource : [songWithUrl];
+            queueIndexRef.current = Math.max(0, queueSource.findIndex(s => songKey(s) === key));
+            setCurrentSong(songWithUrl);
+            setNativeIsPlaying(true);
+            nativeTrackLoadedRef.current = true;
+            nativeShouldPlayRef.current = true;
+            activeEngineRef.current = 'native-audio';
+            isLoadingSongRef.current = false;
+            setIsLoadingSong(false);
+            setLoadingSongKey(null);
+            prefetchUpcomingVideoIds();
+
+            // Quick async validation. If native failed to start, then switch to fallback.
             let nativeReady = false;
-            for (let i = 0; i < 3; i++) {
-              await sleep(700);
-              if (isStale()) return;
-              try {
-                const st = await NativeMusicPlayer.getPosition();
-                const hasProgress = (st?.duration || 0) > 0 || (st?.currentTime || 0) > 0;
-                if (st?.isPlaying || hasProgress) {
-                  nativeReady = true;
-                  break;
-                }
-              } catch {}
-            }
+            await sleep(350);
+            if (isStale()) return;
+            try {
+              const st = await NativeMusicPlayer.getPosition();
+              const hasProgress = (st?.duration || 0) > 0 || (st?.currentTime || 0) > 0;
+              nativeReady = !!(st?.isPlaying || hasProgress || st?.playWhenReady);
+            } catch {}
 
             if (!nativeReady) {
               console.warn('[Android] Native player did not start via ExoPlayer.');
@@ -1864,24 +1873,9 @@ export default function Home() {
               isLoadingSongRef.current = false;
               setIsLoadingSong(true);
               setLoadingSongKey(key);
-            }
-
-            if (forceWebFallback) {
               // Continue into web/YT fallback path below.
             } else {
-            registerNativeSuccess();
-            queueRef.current = queueSource.length ? queueSource : [songWithUrl];
-            queueIndexRef.current = Math.max(0, queueSource.findIndex(s => songKey(s) === key));
-            setCurrentSong(songWithUrl);
-            setNativeIsPlaying(true);
-            nativeTrackLoadedRef.current = true;
-            nativeShouldPlayRef.current = true;
-            activeEngineRef.current = 'native-audio';
-            isLoadingSongRef.current = false;
-            setIsLoadingSong(false);
-            setLoadingSongKey(null);
-            prefetchUpcomingVideoIds();
-            return;
+              return;
             }
           }
 

@@ -63,7 +63,7 @@ public class MusicPlaybackService extends MediaSessionService {
                 MusicPlayerPlugin.onStateChanged(true, player.getPlayWhenReady(),
                     player.getCurrentPosition(), player.getDuration(), player.getPlaybackState());
             }
-            updateHandler.postDelayed(this, 1000);
+            updateHandler.postDelayed(this, 2000);
         }
     };
 
@@ -492,6 +492,9 @@ public class MusicPlaybackService extends MediaSessionService {
     // ── Cleanup ───────────────────────────────────────────────────────────────
     @Override
     public void onTaskRemoved(Intent rootIntent) {
+        if (shouldUseNativeTransport()) {
+            return;
+        }
         if (ytMode && ytPlaying) {
             return;
         }
