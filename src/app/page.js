@@ -1378,9 +1378,9 @@ export default function Home() {
     let androidFallbackSong = song;
 
     try {
-      // On Android: ALWAYS resolve to a direct stream URL and play via ExoPlayer.
-      // The YT iframe is killed by Android when the app goes to background/lock screen.
-      if (nativeAndroid) {
+      // On Android: use native ExoPlayer only for Audio mode.
+      // Keep Video mode on web/YT path so users can use video playback intentionally.
+      if (nativeAndroid && !videoEnabled) {
         try {
           let streamUrl = null;
           let videoId = song.videoId || null;
@@ -1459,7 +1459,6 @@ export default function Home() {
             }];
 
             yt.pause();
-            setVideoEnabled(false); // Native Android player is audio-only
             await NativeMusicPlayer.playQueue({
               queue: androidQueue,
               index: 0,
@@ -1520,7 +1519,6 @@ export default function Home() {
           setNativeIsPlaying(false);
           nativeTrackLoadedRef.current = false;
           nativeShouldPlayRef.current = false;
-          setVideoEnabled(false);
           isLoadingSongRef.current = false;
           forceWebFallback = true;
           await NativeMusicPlayer.pause().catch(() => {});
