@@ -52,6 +52,7 @@ public class MusicPlaybackService extends MediaSessionService {
     // Track whether we are in "YouTube mode" (no real ExoPlayer stream)
     private boolean ytMode = false;
     private boolean ytPlaying = false;
+    private boolean nativeSessionLoaded = false;
     private String  currentTitle  = "Sonix Music";
     private String  currentArtist = "Playing...";
 
@@ -224,34 +225,38 @@ public class MusicPlaybackService extends MediaSessionService {
                 public int onPlayerCommandRequest(
                         MediaSession session, ControllerInfo controller, int playerCommand) {
                     if (playerCommand == Player.COMMAND_PLAY_PAUSE) {
-                        if (ytMode) {
+                        if (shouldUseNativeTransport()) {
+                            ytMode = false;
+                            if (player.isPlaying()) player.pause();
+                            else                    player.play();
+                        } else if (ytMode) {
                             ytPlaying = !ytPlaying;
                             MusicPlayerPlugin.triggerWebAction(ytPlaying ? "play" : "pause");
                             updateForegroundNotification(currentTitle, currentArtist, ytPlaying);
-                        } else if (player.isPlaying()) {
-                            player.pause();
-                        } else {
-                            player.play();
                         }
                         return androidx.media3.session.SessionResult.RESULT_SUCCESS;
                     }
-                    // Always relay Next/Prev to the web layer
                     if (playerCommand == Player.COMMAND_SEEK_TO_NEXT) {
-                        MusicPlayerPlugin.triggerWebAction("next");
-                        if (!ytMode && player.hasNextMediaItem()) {
+                        if (shouldUseNativeTransport() && player.hasNextMediaItem()) {
+                            ytMode = false;
                             player.seekToNextMediaItem();
                             player.play();
+                        } else {
+                            MusicPlayerPlugin.triggerWebAction("next");
                         }
                         return androidx.media3.session.SessionResult.RESULT_SUCCESS;
                     }
                     if (playerCommand == Player.COMMAND_SEEK_TO_PREVIOUS) {
-                        MusicPlayerPlugin.triggerWebAction("previous");
-                        if (!ytMode && player.hasPreviousMediaItem()) {
+                        if (shouldUseNativeTransport() && player.hasPreviousMediaItem()) {
+                            ytMode = false;
                             player.seekToPreviousMediaItem();
                             player.play();
-                        } else if (!ytMode) {
+                        } else if (shouldUseNativeTransport()) {
+                            ytMode = false;
                             player.seekToDefaultPosition(0);
                             player.play();
+                        } else {
+                            MusicPlayerPlugin.triggerWebAction("previous");
                         }
                         return androidx.media3.session.SessionResult.RESULT_SUCCESS;
                     }
@@ -281,6 +286,12 @@ public class MusicPlaybackService extends MediaSessionService {
         }
     }
 
+    private boolean shouldUseNativeTransport() {
+        if (player == null) return false;
+        if (nativeSessionLoaded) return true;
+        return !ytMode && player.getMediaItemCount() > 0;
+    }
+
     // ── onStartCommand ────────────────────────────────────────────────────────
     @Override
     public int onStartCommand(@Nullable Intent intent, int flags, int startId) {
@@ -303,17 +314,20 @@ public class MusicPlaybackService extends MediaSessionService {
             switch (action) {
                 case ACTION_PLAY_SINGLE:
                     ytMode = false;
+                    nativeSessionLoaded = true;
                     playSingle(intent);
                     break;
 
                 case ACTION_PLAY_QUEUE:
                     ytMode = false;
+                    nativeSessionLoaded = true;
                     playQueue(intent);
                     break;
 
                 // ── YouTube-mode: update notification metadata only ──────────
                 case ACTION_UPDATE_META:
                     ytMode    = true;
+                    nativeSessionLoaded = false;
                     ytPlaying = intent.getBooleanExtra("isPlaying", true);
                     currentTitle  = intent.getStringExtra("title")  != null
                         ? intent.getStringExtra("title")  : "Sonix Music";
@@ -323,47 +337,52 @@ public class MusicPlaybackService extends MediaSessionService {
                     break;
 
                 case ACTION_PAUSE:
-                    if (ytMode) {
+                    if (shouldUseNativeTransport()) {
+                        ytMode = false;
+                        player.pause();
+                    } else if (ytMode) {
                         ytPlaying = false;
                         MusicPlayerPlugin.triggerWebAction("pause");
                         updateForegroundNotification(currentTitle, currentArtist, false);
-                    } else {
-                        player.pause();
                     }
                     break;
 
                 case ACTION_RESUME:
-                    if (ytMode) {
+                    if (shouldUseNativeTransport()) {
+                        ytMode = false;
+                        player.play();
+                    } else if (ytMode) {
                         ytPlaying = true;
                         MusicPlayerPlugin.triggerWebAction("play");
                         updateForegroundNotification(currentTitle, currentArtist, true);
-                    } else {
-                        player.play();
                     }
                     break;
 
                 case ACTION_TOGGLE_PAUSE:
-                    if (ytMode) {
+                    if (shouldUseNativeTransport()) {
+                        ytMode = false;
+                        if (player.isPlaying()) player.pause();
+                        else                    player.play();
+                    } else if (ytMode) {
                         ytPlaying = !ytPlaying;
                         MusicPlayerPlugin.triggerWebAction(ytPlaying ? "play" : "pause");
                         updateForegroundNotification(currentTitle, currentArtist, ytPlaying);
-                    } else {
-                        if (player.isPlaying()) player.pause();
-                        else                    player.play();
                     }
                     break;
 
                 case ACTION_NEXT:
-                    MusicPlayerPlugin.triggerWebAction("next");
-                    if (!ytMode && player.hasNextMediaItem()) {
+                    if (shouldUseNativeTransport() && player.hasNextMediaItem()) {
+                        ytMode = false;
                         player.seekToNextMediaItem();
                         player.play();
+                    } else {
+                        MusicPlayerPlugin.triggerWebAction("next");
                     }
                     break;
 
                 case ACTION_PREVIOUS:
-                    MusicPlayerPlugin.triggerWebAction("previous");
-                    if (!ytMode) {
+                    if (shouldUseNativeTransport()) {
+                        ytMode = false;
                         if (player.hasPreviousMediaItem()) {
                             player.seekToPreviousMediaItem();
                             player.play();
@@ -371,11 +390,14 @@ public class MusicPlaybackService extends MediaSessionService {
                             player.seekToDefaultPosition(0);
                             player.play();
                         }
+                    } else {
+                        MusicPlayerPlugin.triggerWebAction("previous");
                     }
                     break;
 
                 case ACTION_STOP:
                     ytMode = false;
+                    nativeSessionLoaded = false;
                     player.stop();
                     stopForeground(true);
                     stopSelf();

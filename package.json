@@ -5,6 +5,9 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:web": "next build",
+    "sync:android": "npx cap sync android",
+    "prepare:android": "node scripts/prepare-android.js",
     "start": "next start",
     "seed": "node scripts/seed.js",
     "verify:android-playback": "node scripts/verify-android-playback-checklist.js",

@@ -121,6 +121,7 @@ function useYouTubePlayer() {
   const timerRef        = useRef(null);
   const timerRunning    = useRef(false);
   const onEndRef        = useRef(null);
+  const onErrorRef      = useRef(null);
   const pendingVideoIdRef = useRef(null);
   const loadedVideoIdRef  = useRef(null);
   const streamUrlRef      = useRef(null);
@@ -263,6 +264,9 @@ function useYouTubePlayer() {
               console.error('YT player error:', e.data);
               setIsPlaying(false);
               stopTimerRef.current();
+              if (typeof onErrorRef.current === 'function') {
+                try { onErrorRef.current(e.data); } catch {}
+              }
             },
           },
         });
@@ -415,7 +419,7 @@ function useYouTubePlayer() {
     ytReady, isPlaying, duration, currentTime,
     loadedVideoIdRef,
     searchAndPlay, playVideoById, playStream, play, pause, seekTo, setVolume,
-    onEndRef, updateNativeTime,
+    onEndRef, onErrorRef, updateNativeTime,
     audioElement: typeof window !== 'undefined' ? playerRef.current_audio : null
   };
 }
@@ -1063,15 +1067,30 @@ export default function Home() {
             const nativeReadyState =
               (res.playbackState === 2 || res.playbackState === 3) &&
               (shouldKeepPlayingUi || res.playWhenReady || recentNativeProgress);
+            const nativeLooksLoaded =
+              !!res.isPlaying ||
+              !!res.playWhenReady ||
+              recentNativeProgress ||
+              (typeof res.duration === 'number' && res.duration > 0);
 
             // STATE_BUFFERING = 2, keep controls in playing state while startup/buffer happens.
             if (nativeReadyState) {
+              activeEngineRef.current = 'native-audio';
+              nativeTrackLoadedRef.current = true;
+              nativeShouldPlayRef.current = true;
               setNativeIsPlaying(true);
               setOptimisticPlaying(true);
             } else if (res.isPlaying) {
+              activeEngineRef.current = 'native-audio';
+              nativeTrackLoadedRef.current = true;
+              nativeShouldPlayRef.current = true;
               setNativeIsPlaying(true);
               setOptimisticPlaying(true);
             } else {
+              if (nativeLooksLoaded) {
+                activeEngineRef.current = 'native-audio';
+                nativeTrackLoadedRef.current = true;
+              }
               setNativeIsPlaying(false);
               if (!nativeShouldPlayRef.current || res.playbackState === 4) {
                 setOptimisticPlaying(false);
@@ -1163,13 +1182,28 @@ export default function Home() {
                    res.playWhenReady ||
                    recentNativeProgress
                  );
+               const nativeLooksLoaded =
+                 !!res.isPlaying ||
+                 !!res.playWhenReady ||
+                 recentNativeProgress ||
+                 (typeof res.duration === 'number' && res.duration > 0);
                if (nativeReadyState) {
+                 activeEngineRef.current = 'native-audio';
+                 nativeTrackLoadedRef.current = true;
+                 nativeShouldPlayRef.current = true;
                  setNativeIsPlaying(true);
                  setOptimisticPlaying(true);
                } else if (res.isPlaying) {
+                 activeEngineRef.current = 'native-audio';
+                 nativeTrackLoadedRef.current = true;
+                 nativeShouldPlayRef.current = true;
                  setNativeIsPlaying(true);
                  setOptimisticPlaying(true);
                } else {
+                 if (nativeLooksLoaded) {
+                   activeEngineRef.current = 'native-audio';
+                   nativeTrackLoadedRef.current = true;
+                 }
                  setNativeIsPlaying(false);
                  if (!nativeShouldPlayRef.current || res.playbackState === 4) {
                    setOptimisticPlaying(false);
@@ -2071,6 +2105,9 @@ export default function Home() {
   useEffect(() => {
     if (!nativeAndroid || !currentSong || !canUseNativePlugins()) return;
 
+    const engine = activeEngineRef.current;
+    if (engine !== 'web-video' && engine !== 'web-audio') return;
+
     const uiPlayingState = videoEnabled
       ? yt.isPlaying
       : (nativeIsPlaying || optimisticPlaying || yt.isPlaying);
@@ -2359,6 +2396,10 @@ export default function Home() {
     yt.pause();
 
     if (nativeAndroid) {
+      activeEngineRef.current = 'none';
+      nativeTrackLoadedRef.current = false;
+      nativeShouldPlayRef.current = false;
+      setNativeIsPlaying(false);
       isLoadingSongRef.current = false;
       await playSongDirect(currentSong, queueRef.current?.length ? queueRef.current : null, true);
       if (resumeAt > 0) {
@@ -2391,16 +2432,35 @@ export default function Home() {
     activeEngineRef.current = 'none';
   }
 
+  useEffect(() => {
+    yt.onErrorRef.current = async () => {
+      if (!nativeAndroid || !videoEnabled || !currentSong) return;
+      try {
+        await switchToAudioMode();
+      } catch (e) {
+        console.error('Android video fallback failed:', e);
+        setVideoEnabled(false);
+      }
+    };
+
+    return () => {
+      yt.onErrorRef.current = null;
+    };
+  }, [nativeAndroid, videoEnabled, currentSong]);
+
 
 
   async function handlePlayPauseToggle() {
     if (nativeAndroid && currentSong && !videoEnabled) {
       try {
         const canControlNative =
-          nativeTrackLoadedRef.current ||
-          nativeIsPlaying ||
-          nativeShouldPlayRef.current ||
-          optimisticPlaying;
+          activeEngineRef.current === 'native-audio' &&
+          (
+            nativeTrackLoadedRef.current ||
+            nativeIsPlaying ||
+            nativeShouldPlayRef.current ||
+            optimisticPlaying
+          );
 
         if (canControlNative) {
           const currentlyPlaying = nativeIsPlaying || nativeShouldPlayRef.current || optimisticPlaying;
@@ -2422,6 +2482,9 @@ export default function Home() {
 
         // First-open bootstrap: if native engine has no loaded track yet,
         // start the current song directly so play/pause works immediately.
+        activeEngineRef.current = 'none';
+        nativeTrackLoadedRef.current = false;
+        nativeShouldPlayRef.current = false;
         setOptimisticPlaying(true);
         await playSongDirect(currentSong, queueRef.current?.length ? queueRef.current : null, true);
         return;
