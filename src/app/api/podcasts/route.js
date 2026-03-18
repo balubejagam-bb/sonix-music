@@ -9,6 +9,10 @@ if (!globalThis.__SONIX_PODCASTS_API_CACHE) {
   globalThis.__SONIX_PODCASTS_API_CACHE = podcastsApiCache;
 }
 
+function escapeRegex(input) {
+  return String(input || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export async function GET(request) {
   try {
     const { searchParams } = new URL(request.url);
@@ -29,8 +33,10 @@ export async function GET(request) {
     const collection = db.collection('podcasts');
 
     let query = {};
-    if (search) {
-      query.$text = { $search: search };
+    const trimmedSearch = search.trim();
+    const hasSearch = trimmedSearch.length > 0;
+    if (hasSearch) {
+      query.$text = { $search: trimmedSearch };
     }
 
     const skip = (page - 1) * limit;
@@ -38,18 +44,41 @@ export async function GET(request) {
     let docs;
     let total;
 
-    if (all) {
-      docs = await collection.find(query).toArray();
-      total = docs.length;
-    } else {
-      [total, docs] = await Promise.all([
-        collection.countDocuments(query),
-        collection.find(query).skip(skip).limit(limit).toArray()
-      ]);
+    async function runQuery(activeQuery) {
+      if (all) {
+        docs = await collection.find(activeQuery).toArray();
+        total = docs.length;
+      } else {
+        [total, docs] = await Promise.all([
+          collection.countDocuments(activeQuery),
+          collection.find(activeQuery).skip(skip).limit(limit).toArray(),
+        ]);
+      }
+    }
+
+    try {
+      await runQuery(query);
+    } catch (dbError) {
+      // Fallback: if text search/index is unavailable, use a regex OR query.
+      if (!hasSearch) throw dbError;
+
+      const safeSearch = escapeRegex(trimmedSearch);
+      const fallbackQuery = {
+        $or: [
+          { title: { $regex: safeSearch, $options: 'i' } },
+          { artist: { $regex: safeSearch, $options: 'i' } },
+          { description: { $regex: safeSearch, $options: 'i' } },
+        ],
+      };
+
+      await runQuery(fallbackQuery);
     }
 
     // Clean _id for JSON
-    const results = docs.map(d => ({ ...d, _id: d._id.toString() }));
+    const results = docs.map((d) => ({
+      ...d,
+      _id: d?._id ? String(d._id) : undefined,
+    }));
 
     const payload = {
       podcasts: results,

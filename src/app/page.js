@@ -8,7 +8,10 @@ import { useAuth } from '@/lib/authContext';
 import AuthModal from '@/components/AuthModal';
 import AddToPlaylistMenu from '@/components/AddToPlaylistMenu';
 
-const NativeMusicPlayer = registerPlugin('MusicPlayer');
+const NativeMusicPlayer = globalThis.__SONIX_NATIVE_MUSIC_PLAYER__ || registerPlugin('MusicPlayer');
+if (!globalThis.__SONIX_NATIVE_MUSIC_PLAYER__) {
+  globalThis.__SONIX_NATIVE_MUSIC_PLAYER__ = NativeMusicPlayer;
+}
 
 function isNativeAndroid() {
   return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
@@ -57,9 +60,7 @@ function getMusicControls() {
 }
 
 function canUseNativePlugins() {
-  // Some Android devices/ROMs crash inside native media/background plugins.
-  // Keep playback on the stable web path unless explicitly enabled later.
-  return Capacitor.isNativePlatform() && Capacitor.getPlatform() !== 'android';
+  return Capacitor.isNativePlatform();
 }
 
 // ─────────────────────── YOUTUBE AUDIO ENGINE ───────────────────────
@@ -798,8 +799,12 @@ export default function Home() {
                    queue: [{ url: data.streamUrl, title: currentSong.title, artist: currentSong.artist, artwork: currentSong.image || '' }],
                    index: 0
                  });
-                 NativeMusicPlayer.seekTo({ positionMs: time * 1000 });
+                NativeMusicPlayer.seekTo({ positionMs: time * 1000 });
+                nativeTrackLoadedRef.current = true;
+                nativeShouldPlayRef.current = true;
+                setOptimisticPlaying(true);
                  setNativeIsPlaying(true);
+                activeEngineRef.current = 'native-audio';
                }
              } catch(e) {}
            }
@@ -1250,6 +1255,15 @@ export default function Home() {
         ...(options.search && { search: options.search }),
       });
       const res = await fetch(apiPath(`/api/podcasts?${params}`));
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Podcasts API HTTP ${res.status}: ${errText.slice(0, 180)}`);
+      }
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.toLowerCase().includes('application/json')) {
+        const rawText = await res.text();
+        throw new Error(`Podcasts API returned non-JSON: ${rawText.slice(0, 180)}`);
+      }
       const data = await res.json();
       const normalized = (data.podcasts || []).map((pod) => ({
         ...pod,
@@ -1260,7 +1274,13 @@ export default function Home() {
       else { setPodcasts(prev => [...prev, ...normalized]); }
       setTotalPodcasts(data.total || 0);
       setPage(p);
-    } catch (e) { console.error('Failed to load podcasts', e); }
+    } catch (e) {
+      console.error('Failed to load podcasts', e);
+      if (p === 1) {
+        setPodcasts([]);
+        setTotalPodcasts(0);
+      }
+    }
     setLoading(false);
   }
 
@@ -1408,7 +1428,12 @@ export default function Home() {
         .catch(() => []);
 
       const podcastPromise = fetch(apiPath(`/api/podcasts?search=${encodeURIComponent(q)}`))
-        .then(r => r.json())
+        .then(async (r) => {
+          if (!r.ok) return { podcasts: [] };
+          const ct = r.headers.get('content-type') || '';
+          if (!ct.toLowerCase().includes('application/json')) return { podcasts: [] };
+          return r.json();
+        })
         .catch(() => ({ podcasts: [] }));
 
       // DB results
@@ -1587,7 +1612,7 @@ export default function Home() {
     try {
       // On Android: use native ExoPlayer only for Audio mode.
       // Keep Video mode on web/YT path so users can use video playback intentionally.
-      if (nativeAndroid && !videoEnabled) {
+      if (nativeAndroid && !videoEnabled && canUseNativePlugins()) {
         if (!canAttemptNativePlayback()) {
           forceWebFallback = true;
         }
@@ -1805,6 +1830,7 @@ export default function Home() {
         : songForWeb;
 
       const vId = playableSong.videoId || resolvedVideoId;
+      const preferIframePlayback = nativeAndroid;
       setCurrentSong(playableSong);
       setNativeIsPlaying(false);
       nativeTrackLoadedRef.current = false;
@@ -1812,7 +1838,7 @@ export default function Home() {
       
       // Audio-first UX: only load iframe video when user explicitly chooses Video mode.
       if (vId) {
-        if (videoEnabled) {
+        if (videoEnabled || (preferIframePlayback && !isPodcastItem(playableSong))) {
           await enforceEngineLock('web-video');
           yt.playVideoById(vId);
           activeEngineRef.current = 'web-video';
@@ -1821,8 +1847,14 @@ export default function Home() {
           if (isStale()) return;
           if (streamUrl) {
             await enforceEngineLock('web-audio');
-            yt.playStream(streamUrl, vId);
-            activeEngineRef.current = 'web-audio';
+            const started = await yt.playStream(streamUrl, vId);
+            if (started) {
+              activeEngineRef.current = 'web-audio';
+            } else {
+              await enforceEngineLock('web-video');
+              yt.playVideoById(vId);
+              activeEngineRef.current = 'web-video';
+            }
           } else if (isPodcastItem(playableSong)) {
             console.warn('Podcast stream unavailable from dataset URL; skipping video fallback.');
             setOptimisticPlaying(false);
@@ -1861,9 +1893,21 @@ export default function Home() {
           const streamUrl = await resolveAudioStreamForSong(nextSong, fallbackVideoId);
           if (isStale()) return;
           if (streamUrl) {
-            await enforceEngineLock('web-audio');
-            yt.playStream(streamUrl, fallbackVideoId);
-            activeEngineRef.current = 'web-audio';
+            if (preferIframePlayback) {
+              await enforceEngineLock('web-video');
+              yt.playVideoById(fallbackVideoId);
+              activeEngineRef.current = 'web-video';
+            } else {
+              await enforceEngineLock('web-audio');
+              const started = await yt.playStream(streamUrl, fallbackVideoId);
+              if (started) {
+                activeEngineRef.current = 'web-audio';
+              } else {
+                await enforceEngineLock('web-video');
+                yt.playVideoById(fallbackVideoId);
+                activeEngineRef.current = 'web-video';
+              }
+            }
           }
           else {
             await enforceEngineLock('web-video');
@@ -2214,10 +2258,11 @@ export default function Home() {
         const canControlNative =
           nativeTrackLoadedRef.current ||
           nativeIsPlaying ||
+          nativeShouldPlayRef.current ||
           optimisticPlaying;
 
         if (canControlNative) {
-          const currentlyPlaying = nativeIsPlaying || optimisticPlaying;
+          const currentlyPlaying = nativeIsPlaying || nativeShouldPlayRef.current || optimisticPlaying;
 
           if (currentlyPlaying) {
             setOptimisticPlaying(false);
@@ -2288,14 +2333,16 @@ export default function Home() {
   function handleSeek(timeInSeconds) {
     if (!currentSong) return;
     const t = Math.max(0, timeInSeconds);
-    if (nativeAndroid) {
+    const uiDuration = yt.duration > 0 ? yt.duration : Math.max(0, Number(currentSong?.duration || 0));
+
+    if (nativeAndroid && !videoEnabled && canUseNativePlugins() && nativeTrackLoadedRef.current) {
       // Optimistically update seek bar immediately in native mode too.
-      yt.updateNativeTime(t, yt.duration);
+      yt.updateNativeTime(t, uiDuration > 0 ? uiDuration : undefined);
       NativeMusicPlayer.seekTo({ positionMs: t * 1000 }).catch(() => {});
     } else {
       yt.seekTo(t);
       // Optimistically update the displayed time immediately
-      yt.updateNativeTime(t, yt.duration);
+      yt.updateNativeTime(t, uiDuration > 0 ? uiDuration : undefined);
     }
   }
 
@@ -2352,9 +2399,11 @@ export default function Home() {
     }
   }
 
+  const webUiPlaying = yt.isPlaying || (isLoadingSong && optimisticPlaying);
+  const nativeUiPlaying = nativeIsPlaying || nativeShouldPlayRef.current || (isLoadingSong && optimisticPlaying);
   const activePlaying = nativeAndroid
-    ? (videoEnabled ? (yt.isPlaying || optimisticPlaying) : (nativeIsPlaying || optimisticPlaying))
-    : (yt.isPlaying || optimisticPlaying);
+    ? (videoEnabled ? webUiPlaying : nativeUiPlaying)
+    : webUiPlaying;
   const durationForUi = yt.duration > 0 ? yt.duration : Math.max(0, Number(currentSong?.duration || 0));
   const repeatLabel = repeatMode === 'off' ? '🔁' : repeatMode === 'one' ? '🔂' : '🔁';
 
@@ -3037,6 +3086,8 @@ export default function Home() {
                 <div
                   className="progress-track"
                   onClick={(e) => { e.stopPropagation(); seekFromBarEvent(e); }}
+                  onPointerDown={(e) => { e.stopPropagation(); startSeekDrag(e); }}
+                  onPointerUp={(e) => { e.stopPropagation(); seekFromBarEvent(e); }}
                   onMouseDown={(e) => { e.stopPropagation(); startSeekDrag(e); }}
                   onTouchStart={(e) => { e.stopPropagation(); startSeekDrag(e); }}
                   onTouchEnd={(e) => { e.stopPropagation(); e.preventDefault(); seekFromBarEvent(e); }}
@@ -3147,6 +3198,8 @@ export default function Home() {
               <div
                 className="sp-progress-track"
                 onClick={seekFromBarEvent}
+                onPointerDown={startSeekDrag}
+                onPointerUp={seekFromBarEvent}
                 onMouseDown={startSeekDrag}
                 onTouchStart={startSeekDrag}
                 onTouchEnd={(e) => { e.preventDefault(); seekFromBarEvent(e); }}

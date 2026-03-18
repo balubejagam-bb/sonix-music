@@ -22,11 +22,6 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
         debug {
-            applicationVariants.all { variant ->
-                variant.outputs.all {
-                    outputFileName = "sonix-tj.apk"
-                }
-            }
         }
     }
 }

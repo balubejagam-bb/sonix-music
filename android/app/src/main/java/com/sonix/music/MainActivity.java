@@ -11,13 +11,23 @@ public class MainActivity extends BridgeActivity {
 	public void onCreate(Bundle savedInstanceState) {
 		super.onCreate(savedInstanceState);
 
-		registerPlugin(MusicPlayerPlugin.class);
+		try {
+			registerPlugin(MusicPlayerPlugin.class);
+		} catch (Throwable t) {
+			android.util.Log.w("SonixMusic", "MusicPlayer plugin registration skipped", t);
+		}
 
 		// Allow media autoplay without user gesture (fixes 0:00 stuck bug)
-		WebSettings settings = getBridge().getWebView().getSettings();
-		settings.setMediaPlaybackRequiresUserGesture(false);
-		settings.setDomStorageEnabled(true);
-		settings.setJavaScriptEnabled(true);
-		settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+		try {
+			if (getBridge() != null && getBridge().getWebView() != null) {
+				WebSettings settings = getBridge().getWebView().getSettings();
+				settings.setMediaPlaybackRequiresUserGesture(false);
+				settings.setDomStorageEnabled(true);
+				settings.setJavaScriptEnabled(true);
+				settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+			}
+		} catch (Throwable t) {
+			android.util.Log.w("SonixMusic", "WebView media settings not applied", t);
+		}
 	}
 }
