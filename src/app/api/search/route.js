@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic';
+
 /**
  * Hybrid Search API
  * Flow: MongoDB → YouTube Data API v3 → Piped/Invidious (direct, no self-call)

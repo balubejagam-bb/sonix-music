@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic';
+
 /**
  * GET /api/songs/trending
  * Trending score = plays + (likes * 2) + recency bonus

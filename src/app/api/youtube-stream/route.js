@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic';
+
 import { NextResponse } from 'next/server';
 
 // This endpoint extracts the direct audio stream URL from a YouTube video

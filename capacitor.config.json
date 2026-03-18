@@ -1,10 +1,23 @@
 {
   "appId": "com.sonix.music",
   "appName": "Sonix Music",
-  "webDir": "public",
-  "bundledWebRuntime": false,
+  "webDir": "out",
   "server": {
-    "url": "https://sonix-music.vercel.app",
+    "androidScheme": "https",
+    "url": "http://192.168.0.105:3000",
     "cleartext": true
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    },
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_icon_config_sample",
+      "iconColor": "#488AFF",
+      "sound": "beep.wav"
+    },
+    "BackgroundMode": {
+      "enabled": true
+    }
   }
 }

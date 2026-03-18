@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic';
+
 /**
  * /api/yt-stream?videoId=xxx
  * Resolves a YouTube videoId to a direct audio stream URL.

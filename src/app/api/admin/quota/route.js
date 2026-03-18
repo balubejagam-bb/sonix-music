@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic';
+
 import { NextResponse } from 'next/server';
 import { getQuotaStatus } from '@/lib/youtubeApi';
 import { requireAuth } from '@/lib/auth';

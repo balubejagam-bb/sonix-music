@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic';
+
 /**
  * POST /api/song/play/:id
  * Increments play count. Also accepts YouTube song data to persist into DB.

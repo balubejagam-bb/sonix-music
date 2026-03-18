@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic';
+
 /**
  * Instant suggest endpoint — fires on every keystroke (debounced on frontend).
  * Only hits MongoDB, never YouTube. Ultra-fast.

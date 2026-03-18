@@ -303,8 +303,8 @@ function useYouTubePlayer() {
     }
   }
 
-  function playStream(url) {
-    if (!url) return;
+  function playStream(url, fallbackVideoId = null) {
+    if (!url) return Promise.resolve(false);
     pause(); // stop YT
     const a = playerRef.current_audio;
     if (a) {
@@ -319,12 +319,28 @@ function useYouTubePlayer() {
       }
       if (!sameSource) {
         a.src = url;
+        try { a.load(); } catch {}
       }
-      a.play().catch(e => {
+      return a.play().then(() => {
+        setIsPlaying(true);
+        return true;
+      }).catch(e => {
         console.warn('Audio play failed, fallback to YT:', e);
+        if (fallbackVideoId && isValidYouTubeVideoId(fallbackVideoId)) {
+          try {
+            playVideoById(fallbackVideoId);
+            return false;
+          } catch {}
+        }
+        return false;
       });
-      setIsPlaying(true);
     }
+    if (fallbackVideoId && isValidYouTubeVideoId(fallbackVideoId)) {
+      try {
+        playVideoById(fallbackVideoId);
+      } catch {}
+    }
+    return Promise.resolve(false);
   }
 
   function seekTo(t) {
@@ -377,6 +393,32 @@ function decodeHtml(str) {
 }
 
 // ─────────────────────── MAIN APP ───────────────────────
+
+function GlobalErrorHandler() {
+  useEffect(() => {
+    const handleGlobalError = (event) => {
+      const msg = event.message?.toLowerCase() || '';
+      const reason = event.reason?.message?.toLowerCase() || '';
+      const isConnectionError = msg.includes('could not establish connection') || reason.includes('could not establish connection');
+
+      if (isConnectionError) {
+        console.warn('[Sonix] Suppressed a harmless browser extension error.');
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    };
+
+    window.addEventListener('error', handleGlobalError, true);
+    window.addEventListener('unhandledrejection', handleGlobalError, true);
+
+    return () => {
+      window.removeEventListener('error', handleGlobalError, true);
+      window.removeEventListener('unhandledrejection', handleGlobalError, true);
+    };
+  }, []);
+
+  return null;
+}
 export default function Home() {
   const yt = useYouTubePlayer();
   const { user, loading: authLoading, logout, likedSongs, likedSongObjects, toggleLike, userPlaylists } = useAuth();
@@ -571,13 +613,6 @@ export default function Home() {
     return nativeAndroid && typeof song?.url === 'string' && /^https?:\/\//i.test(song.url);
   }
 
-  function isMobileWebBrowser() {
-    if (typeof window === 'undefined') return false;
-    if (Capacitor.isNativePlatform()) return false;
-    const ua = navigator.userAgent || '';
-    return /Android|iPhone|iPad|iPod|Mobile/i.test(ua);
-  }
-
   function openAuthModal() {
     setMobileMenuOpen(false);
     setShowAuthModal(true);
@@ -701,16 +736,6 @@ export default function Home() {
         console.log('[Sonix] App backgrounded. Ensuring playback stability.');
         const bg = await getBackgroundMode();
         if (bg) bg.enable();
-
-        if (!nativeAndroid && !videoEnabled && currentSong) {
-          const a = yt.audioElement;
-          const shouldRecoverWebAudio =
-            activeEngineRef.current === 'web-audio' &&
-            (optimisticPlayingRef.current || optimisticPlaying);
-          if (a && shouldRecoverWebAudio && a.paused) {
-            a.play().catch(() => {});
-          }
-        }
 
         if (
           nativeAndroid &&
@@ -839,7 +864,7 @@ export default function Home() {
       }
       clearInterval(watchdog);
     };
-  }, [currentSong, nativeIsPlaying, optimisticPlaying, yt.isPlaying, videoEnabled]);
+  }, [currentSong, nativeIsPlaying, optimisticPlaying, yt.isPlaying]);
 
   // When user logs in OR cachedSongs loads, sync recently played from server
   useEffect(() => {
@@ -1715,25 +1740,16 @@ export default function Home() {
           yt.playVideoById(vId);
           activeEngineRef.current = 'web-video';
         } else {
-          const streamUrl = await resolveAudioStreamForSongWithRetry(
-            playableSong,
-            vId,
-            isMobileWebBrowser() ? 3 : 2
-          );
+          const streamUrl = await resolveAudioStreamForSong(playableSong, vId);
           if (isStale()) return;
           if (streamUrl) {
             await enforceEngineLock('web-audio');
-            yt.playStream(streamUrl);
+            yt.playStream(streamUrl, vId);
             activeEngineRef.current = 'web-audio';
           } else {
-            if (isMobileWebBrowser()) {
-              setOptimisticPlaying(false);
-              console.warn('[WebMobile] Audio stream unavailable in Audio mode; not falling back to YouTube iframe.');
-            } else {
-              await enforceEngineLock('web-video');
-              yt.playVideoById(vId);
-              activeEngineRef.current = 'web-video';
-            }
+            await enforceEngineLock('web-video');
+            yt.playVideoById(vId);
+            activeEngineRef.current = 'web-video';
           }
         }
       } else {
@@ -1746,28 +1762,18 @@ export default function Home() {
           if (isStale()) return;
           if (streamUrl) {
             await enforceEngineLock('web-audio');
-            yt.playStream(streamUrl);
+            yt.playStream(streamUrl, fallbackVideoId);
             activeEngineRef.current = 'web-audio';
           }
           else {
-            if (isMobileWebBrowser()) {
-              setOptimisticPlaying(false);
-              console.warn('[WebMobile] Audio stream unavailable in Audio mode; not falling back to YouTube iframe.');
-            } else {
-              await enforceEngineLock('web-video');
-              yt.playVideoById(fallbackVideoId);
-              activeEngineRef.current = 'web-video';
-            }
-          }
-        } else {
-          if (isMobileWebBrowser() && !videoEnabled) {
-            setOptimisticPlaying(false);
-            console.warn('[WebMobile] Could not resolve background-capable audio stream.');
-          } else {
             await enforceEngineLock('web-video');
-            yt.searchAndPlay(songForWeb.title || '', songForWeb.artist || '');
+            yt.playVideoById(fallbackVideoId);
             activeEngineRef.current = 'web-video';
           }
+        } else {
+          await enforceEngineLock('web-video');
+          yt.searchAndPlay(songForWeb.title || '', songForWeb.artist || '');
+          activeEngineRef.current = 'web-video';
         }
       }
 
@@ -2012,83 +2018,50 @@ export default function Home() {
     return null;
   }
 
-  async function resolveAudioStreamForSongWithRetry(song, videoId, attempts = 2) {
-    for (let i = 0; i < attempts; i++) {
-      const streamUrl = await resolveAudioStreamForSong(song, videoId);
-      if (streamUrl) return streamUrl;
-      if (i < attempts - 1) {
-        await sleep(500 + i * 400);
-      }
-    }
-    return null;
-  }
-
   async function switchToVideoMode() {
+    if (videoEnabled) return;
+    setVideoEnabled(true);
     if (!currentSong) return;
+
+    const resumeAt = yt.currentTime || 0;
+
     if (nativeAndroid) {
-      const targetVideoId = currentSong.videoId || await resolveSongVideoId(currentSong);
-      if (!targetVideoId) return;
       try {
-        const resumeAt = yt.currentTime || 0;
-
-        if (nativeTrackLoadedRef.current || nativeIsPlaying) {
-          await NativeMusicPlayer.pause().catch(() => {});
-        }
-
-        setNativeIsPlaying(false);
-        nativeShouldPlayRef.current = false;
-        await enforceEngineLock('web-video');
-        setVideoEnabled(true);
-        yt.playVideoById(targetVideoId);
-        activeEngineRef.current = 'web-video';
-        if (resumeAt > 0) {
-          setTimeout(() => yt.seekTo(resumeAt), 350);
-        }
-        if (!currentSong.videoId) {
-          setCurrentSong(prev => prev ? { ...prev, videoId: targetVideoId } : prev);
-        }
-        return;
+        await NativeMusicPlayer.pause();
       } catch {}
-      nativeShouldPlayRef.current = false;
       setNativeIsPlaying(false);
-      await enforceEngineLock('web-video');
-      setVideoEnabled(true);
-      yt.pause();
-      yt.playVideoById(targetVideoId);
-      activeEngineRef.current = 'web-video';
-      if (!currentSong.videoId) setCurrentSong(prev => prev ? { ...prev, videoId: targetVideoId } : prev);
-      return;
+      setOptimisticPlaying(false);
+      nativeShouldPlayRef.current = false;
     }
+
     const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
     if (!videoId) return;
-    const resumeAt = yt.currentTime || 0;
-    const a = yt.audioElement;
-    if (a && a.src && a.src !== window.location.href) {
-      try { a.pause(); } catch {}
-      a.src = '';
-    }
-    setVideoEnabled(true);
+
     await enforceEngineLock('web-video');
-    yt.playVideoById(videoId);
+    const started = yt.playVideoById(videoId);
+    if (!started) {
+      await yt.searchAndPlay(currentSong.title || '', currentSong.artist || '', currentSong.type || 'song');
+    }
     activeEngineRef.current = 'web-video';
-    if (!currentSong.videoId) setCurrentSong(prev => prev ? { ...prev, videoId } : prev);
+
+    if (!currentSong.videoId) {
+      setCurrentSong(prev => prev ? { ...prev, videoId } : prev);
+    }
     if (resumeAt > 0) {
       setTimeout(() => yt.seekTo(resumeAt), 350);
     }
   }
 
   async function switchToAudioMode() {
-    if (!currentSong) {
-      setVideoEnabled(false);
-      return;
-    }
-    
+    if (!videoEnabled) return;
+    setVideoEnabled(false);
+    if (!currentSong) return;
+
     const resumeAt = yt.currentTime || 0;
     yt.pause();
-    setVideoEnabled(false);
 
     if (nativeAndroid) {
-      // Re-initialize native playback so queues and loading states are preserved
+      isLoadingSongRef.current = false;
       await playSongDirect(currentSong, queueRef.current?.length ? queueRef.current : null, true);
       if (resumeAt > 0) {
         setTimeout(() => {
@@ -2099,32 +2072,30 @@ export default function Home() {
     }
 
     const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
-    const streamUrl = await resolveAudioStreamForSongWithRetry(
-      currentSong,
-      videoId,
-      isMobileWebBrowser() ? 3 : 2
-    );
+    if (!videoId) return;
+
+    const streamUrl = await resolveAudioStreamForSong(currentSong, videoId);
     if (streamUrl) {
       await enforceEngineLock('web-audio');
-      yt.playStream(streamUrl);
+      yt.playStream(streamUrl, videoId);
       activeEngineRef.current = 'web-audio';
-      if (resumeAt > 0) setTimeout(() => yt.seekTo(resumeAt), 120);
-      if (videoId && !currentSong.videoId) setCurrentSong(prev => prev ? { ...prev, videoId } : prev);
+      if (resumeAt > 0) {
+        setTimeout(() => yt.seekTo(resumeAt), 120);
+      }
+      if (!currentSong.videoId) {
+        setCurrentSong(prev => prev ? { ...prev, videoId } : prev);
+      }
       return;
     }
 
-    if (videoId) {
-      if (isMobileWebBrowser()) {
-        setOptimisticPlaying(false);
-        console.warn('[WebMobile] Audio stream unavailable in Audio mode; stay in audio-only mode.');
-      } else {
-        await enforceEngineLock('web-video');
-        yt.playVideoById(videoId);
-        activeEngineRef.current = 'web-video';
-        if (!currentSong.videoId) setCurrentSong(prev => prev ? { ...prev, videoId } : prev);
-      }
-    }
+    // Keep playback alive by falling back to video when stream cannot be resolved.
+    setVideoEnabled(true);
+    await enforceEngineLock('web-video');
+    yt.playVideoById(videoId);
+    activeEngineRef.current = 'web-video';
   }
+
+
 
   async function handlePlayPauseToggle() {
     if (nativeAndroid && currentSong && !videoEnabled) {
@@ -2184,55 +2155,20 @@ export default function Home() {
           if (a && a.src && a.src !== window.location.href) {
             yt.play();
           } else {
-            const streamUrl = await resolveAudioStreamForSongWithRetry(
-              currentSong,
-              videoId,
-              isMobileWebBrowser() ? 3 : 2
-            );
-            if (streamUrl) {
-              await enforceEngineLock('web-audio');
-              yt.playStream(streamUrl);
-              activeEngineRef.current = 'web-audio';
-            } else if (isMobileWebBrowser()) {
-              setOptimisticPlaying(false);
-              console.warn('[WebMobile] Audio stream unavailable in Audio mode; not falling back to YouTube iframe.');
-            } else {
-              await enforceEngineLock('web-video');
-              yt.playVideoById(videoId);
-              activeEngineRef.current = 'web-video';
-            }
+            const streamUrl = await resolveAudioStreamForSong(currentSong, videoId);
+            if (streamUrl) yt.playStream(streamUrl, videoId);
+            else yt.playVideoById(videoId);
           }
         }
       } else {
         const fallbackVideoId = await resolveSongVideoId(currentSong);
         if (fallbackVideoId) {
-          const streamUrl = await resolveAudioStreamForSongWithRetry(
-            currentSong,
-            fallbackVideoId,
-            isMobileWebBrowser() ? 3 : 2
-          );
-          if (streamUrl) {
-            await enforceEngineLock('web-audio');
-            yt.playStream(streamUrl);
-            activeEngineRef.current = 'web-audio';
-          } else if (isMobileWebBrowser()) {
-            setOptimisticPlaying(false);
-            console.warn('[WebMobile] Audio stream unavailable in Audio mode; not falling back to YouTube iframe.');
-          } else {
-            await enforceEngineLock('web-video');
-            yt.playVideoById(fallbackVideoId);
-            activeEngineRef.current = 'web-video';
-          }
+          const streamUrl = await resolveAudioStreamForSong(currentSong, fallbackVideoId);
+          if (streamUrl) yt.playStream(streamUrl, fallbackVideoId);
+          else yt.playVideoById(fallbackVideoId);
           setCurrentSong(prev => prev ? { ...prev, videoId: fallbackVideoId } : prev);
         } else {
-          if (isMobileWebBrowser() && !videoEnabled) {
-            setOptimisticPlaying(false);
-            console.warn('[WebMobile] Could not resolve background-capable audio stream.');
-          } else {
-            await enforceEngineLock('web-video');
-            yt.searchAndPlay(currentSong.title, currentSong.artist, currentSong.type || 'song');
-            activeEngineRef.current = 'web-video';
-          }
+          yt.searchAndPlay(currentSong.title, currentSong.artist, currentSong.type || 'song');
         }
       }
     }
