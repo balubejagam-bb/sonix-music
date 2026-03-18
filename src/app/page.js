@@ -302,8 +302,7 @@ function useYouTubePlayer() {
 
   async function searchAndPlay(title, artist, type = 'song') {
     try {
-      const suffix = type === 'podcast' ? '' : ' official audio';
-      const q1 = `${title} ${artist}${suffix}`.trim();
+      const q1 = `${title} ${artist} official audio`.trim();
       const r1 = await fetch(clientApiPath(`/api/youtube-search?q=${encodeURIComponent(q1)}`));
       const d1 = await r1.json();
       if (isValidYouTubeVideoId(d1?.videoId)) { playVideoById(d1.videoId); return true; }
@@ -523,8 +522,6 @@ export default function Home() {
   const [fullPlayerOpen, setFullPlayerOpen] = useState(false);
   const [ytResults, setYtResults] = useState([]);
   const [isSearchingYT, setIsSearchingYT] = useState(false);
-  const [podcasts, setPodcasts] = useState([]);
-  const [totalPodcasts, setTotalPodcasts] = useState(0);
   const [videoEnabled, setVideoEnabled] = useState(false);
   const [visualizer, setVisualizer] = useState('waves'); // waves, bars, pulse
   const [nativeIsPlaying, setNativeIsPlaying] = useState(false);
@@ -535,7 +532,6 @@ export default function Home() {
   const browseAllRef = useRef(null);
   const contentScrollRef = useRef(null);
   const songsRetryTimerRef = useRef(null);
-  const podcastsRetryTimerRef = useRef(null);
   const startupSafetyTimerRef = useRef(null);
   const heroTouchStartXRef = useRef(0);
 
@@ -587,6 +583,7 @@ export default function Home() {
   const nativeControlsEnabledRef = useRef(true);
   const lastNativeTrackKeyRef = useRef(null);
   const lastNativeActionRef = useRef({ action: '', at: 0 });
+  const lastNativeProgressRef = useRef({ time: 0, at: 0 });
   const nativeTrackLoadedRef = useRef(false);
   const activeEngineRef = useRef('none'); // none | native-audio | web-audio | web-video
   const nativeFailureRef = useRef({
@@ -803,10 +800,6 @@ export default function Home() {
         clearTimeout(startupSafetyTimerRef.current);
         startupSafetyTimerRef.current = null;
       }
-      if (podcastsRetryTimerRef.current) {
-        clearTimeout(podcastsRetryTimerRef.current);
-        podcastsRetryTimerRef.current = null;
-      }
     };
   }, []);
 
@@ -854,10 +847,31 @@ export default function Home() {
                 nativeShouldPlayRef.current = true;
                 setOptimisticPlaying(true);
                  setNativeIsPlaying(true);
-                activeEngineRef.current = 'native-audio';
+               activeEngineRef.current = 'native-audio';
                }
              } catch(e) {}
            }
+        } else if (
+          !nativeAndroid &&
+          currentSong &&
+          (yt.isPlaying || optimisticPlayingRef.current) &&
+          activeEngineRef.current !== 'web-audio'
+        ) {
+          try {
+            if (yt.silentAudioRef.current?.paused) {
+              yt.silentAudioRef.current.play().catch(() => {});
+            }
+            const fallbackVideoId = currentSong.videoId || await resolveSongVideoId(currentSong);
+            const streamUrl = await resolveAudioStreamForSong(currentSong, fallbackVideoId, { prefetch: true });
+            if (streamUrl) {
+              await enforceEngineLock('web-audio');
+              const started = await yt.playStream(streamUrl, fallbackVideoId || null);
+              if (started) {
+                activeEngineRef.current = 'web-audio';
+                setOptimisticPlaying(true);
+              }
+            }
+          } catch {}
         }
       } else {
         console.log('[Sonix] App foregrounded. Syncing states.');
@@ -1010,13 +1024,23 @@ export default function Home() {
             : undefined;
           if (shouldApplyNativeProgress(nextCurrentTime)) {
             yt.updateNativeTime(nextCurrentTime, nextDuration);
+            if (
+              typeof nextCurrentTime === 'number' &&
+              nextCurrentTime > lastNativeProgressRef.current.time + 0.15
+            ) {
+              lastNativeProgressRef.current = { time: nextCurrentTime, at: Date.now() };
+            }
           }
 
           if (typeof res.isPlaying === 'boolean') {
             const shouldKeepPlayingUi = nativeShouldPlayRef.current || optimisticPlayingRef.current;
+            const recentNativeProgress = Date.now() - lastNativeProgressRef.current.at < 4000;
+            const nativeReadyState =
+              (res.playbackState === 2 || res.playbackState === 3) &&
+              (shouldKeepPlayingUi || res.playWhenReady || recentNativeProgress);
 
             // STATE_BUFFERING = 2, keep controls in playing state while startup/buffer happens.
-            if (res.playbackState === 2 && shouldKeepPlayingUi) {
+            if (nativeReadyState) {
               setNativeIsPlaying(true);
               setOptimisticPlaying(true);
             } else if (res.isPlaying) {
@@ -1085,9 +1109,24 @@ export default function Home() {
                : undefined;
              if (shouldApplyNativeProgress(nextCurrentTime)) {
                yt.updateNativeTime(nextCurrentTime, nextDuration);
+               if (
+                 typeof nextCurrentTime === 'number' &&
+                 nextCurrentTime > lastNativeProgressRef.current.time + 0.15
+               ) {
+                 lastNativeProgressRef.current = { time: nextCurrentTime, at: Date.now() };
+               }
              }
              if (typeof res.isPlaying === 'boolean') {
-               if (res.playbackState === 2 && (optimisticPlayingRef.current || nativeShouldPlayRef.current)) {
+               const recentNativeProgress = Date.now() - lastNativeProgressRef.current.at < 4000;
+               const nativeReadyState =
+                 (res.playbackState === 2 || res.playbackState === 3) &&
+                 (
+                   optimisticPlayingRef.current ||
+                   nativeShouldPlayRef.current ||
+                   res.playWhenReady ||
+                   recentNativeProgress
+                 );
+               if (nativeReadyState) {
                  setNativeIsPlaying(true);
                  setOptimisticPlaying(true);
                } else if (res.isPlaying) {
@@ -1297,88 +1336,8 @@ export default function Home() {
     setLoading(false);
   }
 
-  async function loadPodcasts(p, options = {}, attempt = 0) {
-    const shouldShowSpinner = p === 1 && podcasts.length === 0 && attempt === 0;
-    if (shouldShowSpinner) setLoading(true);
-    try {
-      const params = new URLSearchParams({
-        page: p, limit: 50,
-        ...(options.search && { search: options.search }),
-      });
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), nativeAndroid ? 18000 : 12000);
-      const res = await fetch(apiPath(`/api/podcasts?${params}`), { signal: controller.signal });
-      clearTimeout(timeout);
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`Podcasts API HTTP ${res.status}: ${errText.slice(0, 180)}`);
-      }
-      const contentType = res.headers.get('content-type') || '';
-      if (!contentType.toLowerCase().includes('application/json')) {
-        const rawText = await res.text();
-        throw new Error(`Podcasts API returned non-JSON: ${rawText.slice(0, 180)}`);
-      }
-      const data = await res.json();
-      const normalized = (data.podcasts || []).map((pod) => ({
-        ...pod,
-        type: pod.type || 'podcast',
-        source: pod.source || 'podcast',
-      }));
-      if (p === 1) { setPodcasts(normalized); }
-      else { setPodcasts(prev => [...prev, ...normalized]); }
-      setTotalPodcasts(data.total || 0);
-      setPage(p);
-
-      if (p === 1 && normalized.length > 0) {
-        try {
-          localStorage.setItem('sonix_podcasts_cache', JSON.stringify(normalized.slice(0, 800)));
-          localStorage.setItem('sonix_podcasts_cache_time', Date.now().toString());
-        } catch {}
-      }
-
-      if (podcastsRetryTimerRef.current) {
-        clearTimeout(podcastsRetryTimerRef.current);
-        podcastsRetryTimerRef.current = null;
-      }
-    } catch (e) {
-      console.error('Failed to load podcasts', e);
-
-      if (p === 1 && attempt < 2) {
-        const delay = 1200 + (attempt * 900);
-        podcastsRetryTimerRef.current = setTimeout(() => {
-          loadPodcasts(1, options, attempt + 1);
-        }, delay);
-      } else if (p === 1) {
-        // Keep UI alive with cached podcasts instead of emptying the list.
-        try {
-          const cachedRaw = localStorage.getItem('sonix_podcasts_cache');
-          if (cachedRaw) {
-            const cached = JSON.parse(cachedRaw);
-            if (Array.isArray(cached) && cached.length > 0) {
-              setPodcasts(cached);
-              setTotalPodcasts(cached.length);
-              return;
-            }
-          }
-        } catch {}
-
-        if (podcasts.length === 0) {
-          setPodcasts([]);
-          setTotalPodcasts(0);
-        }
-      }
-    }
-    setLoading(false);
-  }
-
   function songKey(song) {
     return song.songId || song._id || song.videoId || `${song.title || ''}::${song.artist || ''}`;
-  }
-
-  function isPodcastItem(song) {
-    const type = String(song?.type || '').toLowerCase();
-    const source = String(song?.source || '').toLowerCase();
-    return type === 'podcast' || source === 'podcast';
   }
 
   function isLikelyImageUrl(url = '') {
@@ -1415,9 +1374,7 @@ export default function Home() {
       return pendingVideoIdRef.current.get(key);
     }
 
-    const query = isPodcastItem(song)
-      ? `${song.title || ''} ${song.artist || ''} podcast episode`.trim()
-      : `${song.title || ''} ${song.artist || ''} official audio`.trim();
+    const query = `${song.title || ''} ${song.artist || ''} official audio`.trim();
     const task = searchYouTubeFallback(query)
       .then(data => {
         const candidate = normalizeVideoId(data?.videoId);
@@ -1519,7 +1476,7 @@ export default function Home() {
       ).slice(0, 30);
       setSearchResults(localHits);
 
-      // DB + YT + Podcasts in parallel
+      // DB + YT in parallel
       const dbPromise = fetch(apiPath(`/api/search?q=${encodeURIComponent(q)}`))
         .then(r => r.json())
         .catch(() => null);
@@ -1527,15 +1484,6 @@ export default function Home() {
       const ytPromise = searchYouTubeFallback(q, true)
         .then(d => Array.isArray(d) ? d : (d?.results || []))
         .catch(() => []);
-
-      const podcastPromise = fetch(apiPath(`/api/podcasts?search=${encodeURIComponent(q)}`))
-        .then(async (r) => {
-          if (!r.ok) return { podcasts: [] };
-          const ct = r.headers.get('content-type') || '';
-          if (!ct.toLowerCase().includes('application/json')) return { podcasts: [] };
-          return r.json();
-        })
-        .catch(() => ({ podcasts: [] }));
 
       // DB results
       dbPromise.then(data => {
@@ -1547,11 +1495,6 @@ export default function Home() {
           ytResultsCacheRef.current.set(qKey, data.ytResults);
           setIsSearchingYT(false);
         }
-      }).catch(() => {});
-
-      // Podcast results
-      podcastPromise.then(data => {
-        if (data.podcasts?.length) setPodcasts(data.podcasts);
       }).catch(() => {});
 
       // YT results — update when they arrive, retry once if empty
@@ -1574,7 +1517,7 @@ export default function Home() {
         }
       }).catch(() => setIsSearchingYT(false));
 
-      await Promise.allSettled([dbPromise, ytPromise, podcastPromise]);
+      await Promise.allSettled([dbPromise, ytPromise]);
       setIsSearching(false);
     }, 350);
   }, [search, cachedSongs]);
@@ -1744,9 +1687,8 @@ export default function Home() {
             streamParams.set('url', song.url);
             streamParams.set('title', song.title || '');
             streamParams.set('artist', song.artist || '');
-            streamParams.set('type', isPodcastItem(song) ? 'podcast' : 'song');
-            streamParams.set('source', song.source || (isPodcastItem(song) ? 'podcast' : 'songs'));
-            if (isPodcastItem(song)) streamParams.set('strict', 'true');
+            streamParams.set('type', 'song');
+            streamParams.set('source', song.source || 'songs');
             const data = await fetchJsonWithTimeout(
               apiPath(`/api/stream?${streamParams.toString()}`),
               12000
@@ -1763,17 +1705,11 @@ export default function Home() {
             }
           }
 
-          if (!streamUrl && isPodcastItem(song)) {
-            throw new Error('podcast_strict_stream_unresolved');
-          }
-
           // Path 2: YT song — resolve videoId first if needed, then get stream
           if (!streamUrl) {
             // Resolve videoId if we don't have one yet
             if (!videoId) {
-              const query = isPodcastItem(song)
-                ? `${song.title || ''} ${song.artist || ''} podcast episode`.trim()
-                : `${song.title || ''} ${song.artist || ''} official audio`.trim();
+              const query = `${song.title || ''} ${song.artist || ''} official audio`.trim();
               try {
                 const data = await fetchJsonWithTimeout(apiPath(`/api/youtube-search?q=${encodeURIComponent(query)}`), 12000);
                 if (isStale()) return;
@@ -1806,52 +1742,28 @@ export default function Home() {
 
           if (streamUrl) {
             if (isStale()) return;
-            // For podcasts: ALWAYS use stream URL, never fall back to video for native playback
-            if (isPodcastItem(song)) {
-              streamUrlCacheRef.current.set(key, streamUrl);
-              try { localStorage.setItem(`sonix_stream_${key}`, streamUrl); } catch {}
+            streamUrlCacheRef.current.set(key, streamUrl);
+            try { localStorage.setItem(`sonix_stream_${key}`, streamUrl); } catch {}
 
-              const artwork = song.thumbnail || song.image || 'https://picsum.photos/seed/sonixart/200';
-              const songWithUrl = { ...song, url: streamUrl, videoId: null }; // Explicitly null videoId for podcasts
-              const queueSource = songList || queueRef.current || [];
-              const androidQueue = [{
-                url: streamUrl,
-                title: song.title || 'Unknown Track',
-                artist: song.artist || 'Unknown Artist',
-                album: song.album || 'Sonix Music',
-                artwork,
-              }];
+            const artwork = song.thumbnail || song.image || 'https://picsum.photos/seed/sonixart/200';
+            const songWithUrl = { ...song, url: streamUrl, videoId: videoId || song.videoId };
+            const queueSource = songList || queueRef.current || [];
+            const androidQueue = [{
+              url: streamUrl,
+              title: song.title || 'Unknown Track',
+              artist: song.artist || 'Unknown Artist',
+              album: song.album || 'Sonix Music',
+              artwork,
+            }];
 
-              yt.pause();
-              await enforceEngineLock('native-audio');
-              await NativeMusicPlayer.playQueue({
-                queue: androidQueue,
-                index: 0,
-              });
-            } else {
-              streamUrlCacheRef.current.set(key, streamUrl);
-              try { localStorage.setItem(`sonix_stream_${key}`, streamUrl); } catch {}
-
-              const artwork = song.thumbnail || song.image || 'https://picsum.photos/seed/sonixart/200';
-              const songWithUrl = { ...song, url: streamUrl, videoId: videoId || song.videoId };
-              const queueSource = songList || queueRef.current || [];
-              const androidQueue = [{
-                url: streamUrl,
-                title: song.title || 'Unknown Track',
-                artist: song.artist || 'Unknown Artist',
-                album: song.album || 'Sonix Music',
-                artwork,
-              }];
-
-              yt.pause();
-              await enforceEngineLock('native-audio');
-              await NativeMusicPlayer.playQueue({
-                queue: androidQueue,
-                index: 0,
-                shuffle: shuffleEnabled,
-                repeatMode,
-              });
-            }
+            yt.pause();
+            await enforceEngineLock('native-audio');
+            await NativeMusicPlayer.playQueue({
+              queue: androidQueue,
+              index: 0,
+              shuffle: shuffleEnabled,
+              repeatMode,
+            });
             if (isStale()) return;
 
             // Verify native player actually started.
@@ -1946,7 +1858,7 @@ export default function Home() {
       
       // Audio-first UX: only load iframe video when user explicitly chooses Video mode.
       if (vId) {
-        if (videoEnabled && !isPodcastItem(playableSong)) {
+        if (videoEnabled) {
           await enforceEngineLock('web-video');
           yt.playVideoById(vId);
           activeEngineRef.current = 'web-video';
@@ -1959,7 +1871,7 @@ export default function Home() {
             if (started) {
               activeEngineRef.current = yt.loadedVideoIdRef.current === vId ? 'web-video' : 'web-audio';
             } else {
-              if (!isPodcastItem(playableSong) && vId) {
+              if (vId) {
                 await enforceEngineLock('web-video');
                 yt.playVideoById(vId);
                 activeEngineRef.current = 'web-video';
@@ -1971,13 +1883,6 @@ export default function Home() {
                 return;
               }
             }
-          } else if (isPodcastItem(playableSong)) {
-            console.warn('Podcast stream unavailable from dataset URL; skipping video fallback.');
-            setOptimisticPlaying(false);
-            isLoadingSongRef.current = false;
-            setIsLoadingSong(false);
-            setLoadingSongKey(null);
-            return;
           } else {
             await enforceEngineLock('web-video');
             yt.playVideoById(vId);
@@ -1985,22 +1890,6 @@ export default function Home() {
           }
         }
       } else {
-        if (isPodcastItem(playableSong)) {
-          const streamUrl = await resolveAudioStreamForSong(playableSong, null);
-          if (isStale()) return;
-          if (streamUrl) {
-            await enforceEngineLock('web-audio');
-            yt.playStream(streamUrl, null);
-            activeEngineRef.current = 'web-audio';
-          } else {
-            console.warn('Podcast stream unavailable from dataset URL; skipping search fallback.');
-            setOptimisticPlaying(false);
-            isLoadingSongRef.current = false;
-            setIsLoadingSong(false);
-            setLoadingSongKey(null);
-            return;
-          }
-        } else {
         const fallbackVideoId = await resolveSongVideoId(playableSong);
         if (isStale()) return;
         if (fallbackVideoId) {
@@ -2030,7 +1919,6 @@ export default function Home() {
           setIsLoadingSong(false);
           setLoadingSongKey(null);
           return;
-        }
         }
       }
 
@@ -2074,8 +1962,18 @@ export default function Home() {
           ],
         });
         navigator.mediaSession.playbackState = 'playing';
-        navigator.mediaSession.setActionHandler('play', () => handlePlayPauseToggle());
-        navigator.mediaSession.setActionHandler('pause', () => handlePlayPauseToggle());
+        navigator.mediaSession.setActionHandler('play', () => {
+          const uiPlayingState = nativeAndroid && !videoEnabled
+            ? (nativeIsPlaying || nativeShouldPlayRef.current || optimisticPlayingRef.current)
+            : yt.isPlaying;
+          if (!uiPlayingState) handlePlayPauseToggle();
+        });
+        navigator.mediaSession.setActionHandler('pause', () => {
+          const uiPlayingState = nativeAndroid && !videoEnabled
+            ? (nativeIsPlaying || nativeShouldPlayRef.current || optimisticPlayingRef.current)
+            : yt.isPlaying;
+          if (uiPlayingState) handlePlayPauseToggle();
+        });
         navigator.mediaSession.setActionHandler('previoustrack', () => handlePrev());
         navigator.mediaSession.setActionHandler('nexttrack', () => handleNext());
         navigator.mediaSession.setActionHandler('seekto', (d) => { if (d.seekTime != null) handleSeek(d.seekTime); });
@@ -2255,7 +2153,6 @@ export default function Home() {
   async function resolveAudioStreamForSong(song, videoId, options = {}) {
     if (!song) return null;
     const key = songKey(song);
-    const podcastMode = isPodcastItem(song);
     const preferFast = options?.prefetch === true;
 
     const cachedStream = streamUrlCacheRef.current.get(key) || localStorage.getItem(`sonix_stream_${key}`);
@@ -2271,15 +2168,14 @@ export default function Home() {
       let resolved = null;
       let fallbackVideoId = normalizeVideoId(videoId);
 
-      if (song.url && /^https?:\/\//i.test(song.url) && !(podcastMode && isLikelyImageUrl(song.url))) {
+      if (song.url && /^https?:\/\//i.test(song.url)) {
         try {
           const params = new URLSearchParams();
           params.set('url', song.url);
           params.set('title', song.title || '');
           params.set('artist', song.artist || '');
-          params.set('type', podcastMode ? 'podcast' : 'song');
-          params.set('source', song.source || (podcastMode ? 'podcast' : 'songs'));
-          if (podcastMode) params.set('strict', 'true');
+          params.set('type', 'song');
+          params.set('source', song.source || 'songs');
           const data = await fetchJsonWithTimeout(
             apiPath(`/api/stream?${params.toString()}`),
             nativeAndroid ? 14000 : 10000
@@ -2298,39 +2194,7 @@ export default function Home() {
         } catch {}
       }
 
-      if (!resolved && podcastMode) {
-        // Some podcast records contain artwork/image URLs instead of audio feeds.
-        // Fall back to title-based stream lookup so playback still works.
-        try {
-          const q = `${song.title || ''} ${song.artist || ''} podcast episode`.trim();
-          if (q) {
-            const ytData = await fetchJsonWithTimeout(
-              apiPath(`/api/youtube-search?q=${encodeURIComponent(q)}&stream=true`),
-              preferFast ? 7000 : 10000
-            );
-            if (ytData?.streamUrl) {
-              resolved = ytData.streamUrl;
-            }
-          }
-        } catch {}
-
-        if (!resolved && song.url && isLikelyImageUrl(song.url)) {
-          try {
-            const q = `${song.title || ''} podcast`.trim();
-            if (q) {
-              const ytData = await fetchJsonWithTimeout(
-                apiPath(`/api/youtube-search?q=${encodeURIComponent(q)}&stream=true`),
-                preferFast ? 7000 : 10000
-              );
-              if (ytData?.streamUrl) {
-                resolved = ytData.streamUrl;
-              }
-            }
-          } catch {}
-        }
-      }
-
-      if (!resolved && !podcastMode && fallbackVideoId) {
+      if (!resolved && fallbackVideoId) {
         try {
           const data = await fetchJsonWithTimeout(
             apiPath(`/api/yt-stream?videoId=${encodeURIComponent(fallbackVideoId)}`),
@@ -2342,7 +2206,7 @@ export default function Home() {
         } catch {}
       }
 
-      if (!resolved && !podcastMode) {
+      if (!resolved) {
         try {
           const q = `${song.title || ''} ${song.artist || ''}`.trim();
           if (q) {
@@ -2365,7 +2229,7 @@ export default function Home() {
         } catch {}
       }
 
-      if (!resolved && !podcastMode && fallbackVideoId) {
+      if (!resolved && fallbackVideoId) {
         try {
           const data = await fetchJsonWithTimeout(
             apiPath(`/api/yt-stream?videoId=${encodeURIComponent(fallbackVideoId)}`),
@@ -2616,7 +2480,11 @@ export default function Home() {
   }
 
   const webUiPlaying = yt.isPlaying || (isLoadingSong && optimisticPlaying);
-  const nativeUiPlaying = nativeIsPlaying || nativeShouldPlayRef.current || (isLoadingSong && optimisticPlaying);
+  const nativeUiPlaying =
+    nativeIsPlaying ||
+    nativeShouldPlayRef.current ||
+    (Date.now() - lastNativeProgressRef.current.at < 4000) ||
+    (isLoadingSong && optimisticPlaying);
   const activePlaying = nativeAndroid
     ? (videoEnabled ? webUiPlaying : nativeUiPlaying)
     : webUiPlaying;
@@ -2698,8 +2566,7 @@ export default function Home() {
   }, [currentSong, yt.duration]);
 
   function loadMore() { 
-    if (view === 'podcasts') loadPodcasts(page + 1, { search });
-    else loadSongs(page + 1, { search, genre, source }); 
+    loadSongs(page + 1, { search, genre, source }); 
   }
 
   async function handleTrendingViewAll() {
@@ -2808,10 +2675,6 @@ export default function Home() {
           <button className={`nav-item ${view === 'search' ? 'active' : ''}`} onClick={() => { setView('search'); setMobileMenuOpen(false); }}>
             <span className="icon">🔍</span> Explore
           </button>
-          <button className={`nav-item ${view === 'podcasts' ? 'active' : ''}`} onClick={() => { setView('podcasts'); loadPodcasts(1); setMobileMenuOpen(false); }}>
-            <span className="icon">🎙️</span> Podcasts
-          </button>
-
           <div className="nav-section-title">Your Library</div>
           <button className={`nav-item ${view === 'liked' ? 'active' : ''}`} onClick={() => { setView('liked'); setMobileMenuOpen(false); }}>
             <span className="icon">💚</span> Liked Songs
@@ -3087,16 +2950,6 @@ export default function Home() {
             </div>
           )}
 
-          {view === 'podcasts' && !search.trim() && (
-            <div className="section-header fade-in">
-              <div>
-                <h2>🎙️ Podcasts</h2>
-                <p style={{ color: '#9ca3af', fontSize: '13px', marginTop: '4px' }}>{totalPodcasts.toLocaleString()} shows</p>
-              </div>
-              <button className="view-all" onClick={() => { setView('home'); loadSongs(1); }}>← Back</button>
-            </div>
-          )}
-
           {(view === 'search' || search.trim()) && (
             <div className="section-header fade-in">
               <h2>{search.trim() ? `Results for "${search}"` : 'Search'}</h2>
@@ -3105,8 +2958,8 @@ export default function Home() {
           )}
 
           <div className="song-list">
-            {(view === 'podcasts' ? podcasts : activeSongs).map((song, i) => {
-              const queueSource = view === 'podcasts' ? podcasts : activeSongs;
+            {activeSongs.map((song, i) => {
+              const queueSource = activeSongs;
               const key = song.songId || song._id || song.videoId || `${song.title || ''}::${song.artist || ''}`;
               const isLiked = likedSongs.has(key);
               const isCurrentSong = currentSong && songKey(currentSong) === key;
@@ -3166,8 +3019,8 @@ export default function Home() {
           {loading && <div className="spinner"></div>}
 
           {!loading && !search.trim() && (
-            (view === 'podcasts' ? podcasts : displaySongs).length > 0 && 
-            (view === 'podcasts' ? podcasts : displaySongs).length < (view === 'podcasts' ? totalPodcasts : totalSongs)
+            displaySongs.length > 0 && 
+            displaySongs.length < totalSongs
           ) && (
             <div style={{ textAlign: 'center', padding: '24px' }}>
               <button className="pill" onClick={loadMore} style={{ padding: '10px 32px' }}>Load More</button>

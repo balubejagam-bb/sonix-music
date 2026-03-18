@@ -20,17 +20,28 @@ export async function GET(request) {
   try {
     // If it's already a direct audio URL, return it immediately.
     if (/\.(mp3|m4a|m4b|aac|ogg|flac|wav|mp4)(\?|$)/i.test(songUrl)) {
+      if (isPodcast) {
+        const proxiedDirectAudio = await resolveDirectPodcastAudio(request, songUrl);
+        if (proxiedDirectAudio) {
+          return NextResponse.json({ streamUrl: proxiedDirectAudio, source: 'podcast-direct-proxy' });
+        }
+      }
       return NextResponse.json({ streamUrl: songUrl, source: 'direct' });
     }
 
-    // Podcast mode is strict: prefer the dataset URL and never drift to unrelated matches.
-    if (songUrl && isPodcast) {
-      const podcastStream = await resolvePodcastSource(songUrl);
-      if (podcastStream) {
-        return NextResponse.json({ streamUrl: podcastStream, source: 'podcast' });
+    // Podcast mode is strict: never drift to unrelated songs, but still recover from stale feed URLs.
+    if (isPodcast) {
+      if (songUrl) {
+        const podcastStream = await resolvePodcastSource(songUrl);
+        if (podcastStream) {
+          const proxiedPodcastStream = await toPlayablePodcastStream(request, podcastStream);
+          if (proxiedPodcastStream) {
+            return NextResponse.json({ streamUrl: proxiedPodcastStream, source: 'podcast' });
+          }
+        }
       }
 
-      // Fallback: resolve from title/artist so playback still works for stale/broken feed URLs.
+      // Fallback: resolve from title/artist so playback still works for stale/broken feed or image URLs.
       const fallback = await resolvePodcastFallbackStream(request, title, artist);
       if (fallback) {
         return NextResponse.json({ streamUrl: fallback, source: 'podcast-fallback' });
@@ -65,31 +76,123 @@ export async function GET(request) {
   }
 }
 
+async function resolveDirectPodcastAudio(request, url) {
+  const playable = await ensureReachableAudioUrl(url);
+  return playable ? buildAudioProxyUrl(request, playable) : null;
+}
+
+async function toPlayablePodcastStream(request, url) {
+  if (!url || !/^https?:\/\//i.test(url)) return null;
+  const playable = await ensureReachableAudioUrl(url);
+  return playable ? buildAudioProxyUrl(request, playable) : null;
+}
+
+function buildAudioProxyUrl(request, sourceUrl) {
+  const reqUrl = new URL(request.url);
+  return `${reqUrl.protocol}//${reqUrl.host}/api/audio-proxy?url=${encodeURIComponent(sourceUrl)}`;
+}
+
+async function ensureReachableAudioUrl(url) {
+  const checked = await probeAudioUrl(url, 'HEAD');
+  if (checked) return checked;
+  return await probeAudioUrl(url, 'GET');
+}
+
+async function probeAudioUrl(url, method = 'HEAD') {
+  try {
+    const headers = {
+      'Accept': 'audio/*,application/octet-stream;q=0.9,*/*;q=0.5',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'Cache-Control': 'no-cache',
+    };
+
+    if (method === 'GET') {
+      headers.Range = 'bytes=0-1';
+    }
+
+    const res = await fetch(url, {
+      method,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(9000),
+      headers,
+    });
+
+    if (!res.ok && res.status !== 206) return null;
+
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    if (
+      contentType.includes('audio/') ||
+      contentType.includes('video/mp4') ||
+      /\.(mp3|m4a|m4b|aac|ogg|flac|wav|mp4)(\?|$)/i.test(res.url || url)
+    ) {
+      return res.url || url;
+    }
+  } catch {}
+
+  return null;
+}
+
 async function resolvePodcastFallbackStream(request, title = '', artist = '') {
   try {
-    const q = `${title || ''} ${artist || ''} podcast episode`.trim();
-    if (!q) return null;
-
     const url = new URL(request.url);
     const origin = `${url.protocol}//${url.host}`;
-    const res = await fetch(
-      `${origin}/api/youtube-search?q=${encodeURIComponent(q)}&stream=true`,
-      { signal: AbortSignal.timeout(8000), headers: { 'Accept': 'application/json' } }
-    );
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (typeof data?.streamUrl === 'string' && /^https?:\/\//i.test(data.streamUrl)) {
-      return data.streamUrl;
+
+    const queries = [
+      `${title || ''} ${artist || ''} podcast episode`.trim(),
+      `${title || ''} ${artist || ''} podcast`.trim(),
+      `${title || ''} ${artist || ''}`.trim(),
+    ].filter(Boolean);
+
+    for (const q of queries) {
+      const stream = await resolveYoutubeStreamFromQuery(origin, q);
+      if (stream) return stream;
     }
+
     return null;
   } catch {
     return null;
   }
 }
 
+async function resolveYoutubeStreamFromQuery(origin, query) {
+  try {
+    const res = await fetch(
+      `${origin}/api/youtube-search?q=${encodeURIComponent(query)}&stream=true`,
+      { signal: AbortSignal.timeout(8000), headers: { 'Accept': 'application/json' } }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+
+    if (typeof data?.streamUrl === 'string' && /^https?:\/\//i.test(data.streamUrl)) {
+      return data.streamUrl;
+    }
+
+    const videoId = typeof data?.videoId === 'string' ? data.videoId.trim() : '';
+    if (/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
+      const ytRes = await fetch(
+        `${origin}/api/yt-stream?videoId=${encodeURIComponent(videoId)}`,
+        { signal: AbortSignal.timeout(9000), headers: { 'Accept': 'application/json' } }
+      );
+      if (!ytRes.ok) return null;
+      const ytData = await ytRes.json();
+      if (typeof ytData?.streamUrl === 'string' && /^https?:\/\//i.test(ytData.streamUrl)) {
+        return ytData.streamUrl;
+      }
+    }
+  } catch {}
+
+  return null;
+}
+
 async function resolvePodcastSource(feedOrEpisodeUrl) {
   try {
     console.log('[Podcast Resolver] Input URL:', feedOrEpisodeUrl?.substring(0, 100));
+
+    // Many legacy podcast records store artwork links in url; skip network fetch and use title fallback.
+    if (isLikelyImageUrl(feedOrEpisodeUrl)) {
+      console.warn('[Podcast Resolver] URL appears to be artwork, skipping feed fetch');
+      return null;
+    }
     
     // Already a direct audio URL
     if (/\.(mp3|m4a|m4b|aac|ogg|wav|flac|mp4)(\?|$)/i.test(feedOrEpisodeUrl)) {
@@ -179,6 +282,10 @@ async function resolvePodcastSource(feedOrEpisodeUrl) {
     console.error('[Podcast Resolver] Exception:', e.message);
     return null;
   }
+}
+
+function isLikelyImageUrl(url = '') {
+  return /\.(jpg|jpeg|png|gif|webp|svg)(\?|$)/i.test(String(url || ''));
 }
 
 function extractTitleFromUrl(url) {

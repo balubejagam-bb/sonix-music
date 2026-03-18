@@ -59,7 +59,7 @@ public class MusicPlaybackService extends MediaSessionService {
     private final Runnable updateRunnable = new Runnable() {
         @Override public void run() {
             if (player != null && player.isPlaying()) {
-                MusicPlayerPlugin.onStateChanged(true,
+                MusicPlayerPlugin.onStateChanged(true, player.getPlayWhenReady(),
                     player.getCurrentPosition(), player.getDuration(), player.getPlaybackState());
             }
             updateHandler.postDelayed(this, 1000);
@@ -112,6 +112,10 @@ public class MusicPlaybackService extends MediaSessionService {
             .setOngoing(playing)
             // Show on lock screen AND notification shade
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setSilent(true)
+            .setShowWhen(false)
             // Prevent heads-up popup for every state change
             .setOnlyAlertOnce(true)
             // Android 12+ — show immediately in notification shade
@@ -205,6 +209,7 @@ public class MusicPlaybackService extends MediaSessionService {
                 public MediaSession.ConnectionResult onConnect(
                         MediaSession session, ControllerInfo controller) {
                     Player.Commands cmds = Player.Commands.EMPTY.buildUpon()
+                        .add(Player.COMMAND_PLAY_PAUSE)
                         .add(Player.COMMAND_SEEK_TO_NEXT)
                         .add(Player.COMMAND_SEEK_TO_PREVIOUS)
                         .add(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
@@ -218,6 +223,18 @@ public class MusicPlaybackService extends MediaSessionService {
                 @Override
                 public int onPlayerCommandRequest(
                         MediaSession session, ControllerInfo controller, int playerCommand) {
+                    if (playerCommand == Player.COMMAND_PLAY_PAUSE) {
+                        if (ytMode) {
+                            ytPlaying = !ytPlaying;
+                            MusicPlayerPlugin.triggerWebAction(ytPlaying ? "play" : "pause");
+                            updateForegroundNotification(currentTitle, currentArtist, ytPlaying);
+                        } else if (player.isPlaying()) {
+                            player.pause();
+                        } else {
+                            player.play();
+                        }
+                        return androidx.media3.session.SessionResult.RESULT_SUCCESS;
+                    }
                     // Always relay Next/Prev to the web layer
                     if (playerCommand == Player.COMMAND_SEEK_TO_NEXT) {
                         MusicPlayerPlugin.triggerWebAction("next");
@@ -250,6 +267,7 @@ public class MusicPlaybackService extends MediaSessionService {
         if (player == null) return;
         MusicPlayerPlugin.onStateChanged(
             player.isPlaying(),
+            player.getPlayWhenReady(),
             player.getCurrentPosition(),
             player.getDuration(),
             player.getPlaybackState());
@@ -452,6 +470,9 @@ public class MusicPlaybackService extends MediaSessionService {
     // ── Cleanup ───────────────────────────────────────────────────────────────
     @Override
     public void onTaskRemoved(Intent rootIntent) {
+        if (ytMode && ytPlaying) {
+            return;
+        }
         if (!player.getPlayWhenReady()
                 || player.getPlaybackState() == Player.STATE_IDLE
                 || player.getPlaybackState() == Player.STATE_ENDED) {

@@ -21,10 +21,11 @@ public class MusicPlayerPlugin extends Plugin {
         instance = this;
     }
 
-    public static void onStateChanged(boolean isPlaying, long currentTime, long duration, int playbackState) {
+    public static void onStateChanged(boolean isPlaying, boolean playWhenReady, long currentTime, long duration, int playbackState) {
         if (instance != null) {
             com.getcapacitor.JSObject ret = new com.getcapacitor.JSObject();
             ret.put("isPlaying", isPlaying);
+            ret.put("playWhenReady", playWhenReady);
             ret.put("currentTime", currentTime / 1000.0);
             ret.put("duration", duration / 1000.0);
             ret.put("playbackState", playbackState);
@@ -55,7 +56,7 @@ public class MusicPlayerPlugin extends Plugin {
         intent.putExtra("title",     title);
         intent.putExtra("artist",    artist);
         intent.putExtra("isPlaying", playing);
-        getContext().startService(intent);
+        startPlaybackService(intent);
         call.resolve();
     }
 
@@ -73,7 +74,7 @@ public class MusicPlayerPlugin extends Plugin {
         intent.putExtra("artist", call.getString("artist", "Unknown Artist"));
         intent.putExtra("album", call.getString("album", "Sonix Music"));
         intent.putExtra("artwork", call.getString("artwork", ""));
-        getContext().startService(intent);
+        startPlaybackService(intent);
         call.resolve();
     }
 
@@ -90,7 +91,7 @@ public class MusicPlayerPlugin extends Plugin {
         intent.putExtra("index", call.getInt("index", 0));
         intent.putExtra("shuffle", call.getBoolean("shuffle", false));
         intent.putExtra("repeatMode", call.getString("repeatMode", "off"));
-        getContext().startService(intent);
+        startPlaybackService(intent);
         call.resolve();
     }
 
@@ -124,7 +125,7 @@ public class MusicPlayerPlugin extends Plugin {
         long positionMs = Math.max(0L, Math.round(call.getDouble("positionMs", 0.0)));
         Intent intent = baseIntent(MusicPlaybackService.ACTION_SEEK);
         intent.putExtra("positionMs", positionMs);
-        getContext().startService(intent);
+        startPlaybackService(intent);
         call.resolve();
     }
 
@@ -133,7 +134,7 @@ public class MusicPlayerPlugin extends Plugin {
         boolean enabled = call.getBoolean("enabled", false);
         Intent intent = baseIntent(MusicPlaybackService.ACTION_SET_SHUFFLE);
         intent.putExtra("enabled", enabled);
-        getContext().startService(intent);
+        startPlaybackService(intent);
         call.resolve();
     }
 
@@ -142,7 +143,7 @@ public class MusicPlayerPlugin extends Plugin {
         String mode = call.getString("mode", "off");
         Intent intent = baseIntent(MusicPlaybackService.ACTION_SET_REPEAT);
         intent.putExtra("repeatMode", mode);
-        getContext().startService(intent);
+        startPlaybackService(intent);
         call.resolve();
     }
 
@@ -158,6 +159,7 @@ public class MusicPlayerPlugin extends Plugin {
                     ret.put("currentTime", Math.max(0L, current) / 1000.0);
                     ret.put("duration", duration > 0 ? duration / 1000.0 : 0.0);
                     ret.put("isPlaying", MusicPlaybackService.currentPlayer.isPlaying());
+                    ret.put("playWhenReady", MusicPlaybackService.currentPlayer.getPlayWhenReady());
                     ret.put("playbackState", MusicPlaybackService.currentPlayer.getPlaybackState());
                     call.resolve(ret);
                 } catch (Exception e) {
@@ -170,7 +172,12 @@ public class MusicPlayerPlugin extends Plugin {
     }
 
     private void dispatchSimple(PluginCall call, String action) {
-        getContext().startService(baseIntent(action));
+        Intent intent = baseIntent(action);
+        if (MusicPlaybackService.ACTION_STOP.equals(action)) {
+            getContext().startService(intent);
+        } else {
+            startPlaybackService(intent);
+        }
         call.resolve();
     }
 
@@ -178,5 +185,9 @@ public class MusicPlayerPlugin extends Plugin {
         Intent intent = new Intent(getContext(), MusicPlaybackService.class);
         intent.setAction(action);
         return intent;
+    }
+
+    private void startPlaybackService(Intent intent) {
+        ContextCompat.startForegroundService(getContext(), intent);
     }
 }
