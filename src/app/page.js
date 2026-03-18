@@ -543,6 +543,7 @@ export default function Home() {
   const browseAllRef = useRef(null);
   const contentScrollRef = useRef(null);
   const songsRetryTimerRef = useRef(null);
+  const podcastsRetryTimerRef = useRef(null);
   const startupSafetyTimerRef = useRef(null);
   const heroTouchStartXRef = useRef(0);
 
@@ -809,6 +810,10 @@ export default function Home() {
       if (startupSafetyTimerRef.current) {
         clearTimeout(startupSafetyTimerRef.current);
         startupSafetyTimerRef.current = null;
+      }
+      if (podcastsRetryTimerRef.current) {
+        clearTimeout(podcastsRetryTimerRef.current);
+        podcastsRetryTimerRef.current = null;
       }
     };
   }, []);
@@ -1300,14 +1305,18 @@ export default function Home() {
     setLoading(false);
   }
 
-  async function loadPodcasts(p, options = {}) {
-    setLoading(true);
+  async function loadPodcasts(p, options = {}, attempt = 0) {
+    const shouldShowSpinner = p === 1 && podcasts.length === 0 && attempt === 0;
+    if (shouldShowSpinner) setLoading(true);
     try {
       const params = new URLSearchParams({
         page: p, limit: 50,
         ...(options.search && { search: options.search }),
       });
-      const res = await fetch(apiPath(`/api/podcasts?${params}`));
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), nativeAndroid ? 18000 : 12000);
+      const res = await fetch(apiPath(`/api/podcasts?${params}`), { signal: controller.signal });
+      clearTimeout(timeout);
       if (!res.ok) {
         const errText = await res.text();
         throw new Error(`Podcasts API HTTP ${res.status}: ${errText.slice(0, 180)}`);
@@ -1327,11 +1336,44 @@ export default function Home() {
       else { setPodcasts(prev => [...prev, ...normalized]); }
       setTotalPodcasts(data.total || 0);
       setPage(p);
+
+      if (p === 1 && normalized.length > 0) {
+        try {
+          localStorage.setItem('sonix_podcasts_cache', JSON.stringify(normalized.slice(0, 800)));
+          localStorage.setItem('sonix_podcasts_cache_time', Date.now().toString());
+        } catch {}
+      }
+
+      if (podcastsRetryTimerRef.current) {
+        clearTimeout(podcastsRetryTimerRef.current);
+        podcastsRetryTimerRef.current = null;
+      }
     } catch (e) {
       console.error('Failed to load podcasts', e);
-      if (p === 1) {
-        setPodcasts([]);
-        setTotalPodcasts(0);
+
+      if (p === 1 && attempt < 2) {
+        const delay = 1200 + (attempt * 900);
+        podcastsRetryTimerRef.current = setTimeout(() => {
+          loadPodcasts(1, options, attempt + 1);
+        }, delay);
+      } else if (p === 1) {
+        // Keep UI alive with cached podcasts instead of emptying the list.
+        try {
+          const cachedRaw = localStorage.getItem('sonix_podcasts_cache');
+          if (cachedRaw) {
+            const cached = JSON.parse(cachedRaw);
+            if (Array.isArray(cached) && cached.length > 0) {
+              setPodcasts(cached);
+              setTotalPodcasts(cached.length);
+              return;
+            }
+          }
+        } catch {}
+
+        if (podcasts.length === 0) {
+          setPodcasts([]);
+          setTotalPodcasts(0);
+        }
       }
     }
     setLoading(false);
