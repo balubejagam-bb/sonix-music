@@ -584,6 +584,7 @@ export default function Home() {
   const playStartTimeoutRef = useRef(null);
   const videoIdCacheRef = useRef(new Map());
   const streamUrlCacheRef = useRef(new Map());
+  const pendingStreamResolveRef = useRef(new Map());
   const nativeShouldPlayRef = useRef(false);
   const optimisticPlayingRef = useRef(false);
   const nativeLastResumeAtRef = useRef(0);
@@ -1346,6 +1347,11 @@ export default function Home() {
     return type === 'podcast' || source === 'podcast';
   }
 
+  function isLikelyImageUrl(url = '') {
+    if (typeof url !== 'string') return false;
+    return /\.(jpg|jpeg|png|gif|webp|svg)(\?|$)/i.test(url);
+  }
+
   async function resolveSongVideoId(song) {
     if (!song) return null;
     const key = songKey(song);
@@ -1411,6 +1417,16 @@ export default function Home() {
         fetch(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(nextVideoId)}`)).catch(() => {});
       }
       resolveSongVideoId(nextSong).catch(() => {});
+
+      // Warm resolved stream URLs for faster next/prev switching.
+      // Keep this shallow to avoid aggressive network churn on mobile.
+      if (step <= 2) {
+        const key = songKey(nextSong);
+        const cached = streamUrlCacheRef.current.get(key) || localStorage.getItem(`sonix_stream_${key}`);
+        if (!cached) {
+          resolveAudioStreamForSong(nextSong, nextVideoId || null, { prefetch: true }).catch(() => {});
+        }
+      }
     }
   }
 
@@ -2177,51 +2193,114 @@ export default function Home() {
     }
   }
 
-  async function resolveAudioStreamForSong(song, videoId) {
+  async function resolveAudioStreamForSong(song, videoId, options = {}) {
     if (!song) return null;
+    const key = songKey(song);
     const podcastMode = isPodcastItem(song);
+    const preferFast = options?.prefetch === true;
 
-    if (song.url && /^https?:\/\//i.test(song.url)) {
-      try {
-        const params = new URLSearchParams();
-        params.set('url', song.url);
-        params.set('title', song.title || '');
-        params.set('artist', song.artist || '');
-        params.set('type', podcastMode ? 'podcast' : 'song');
-        params.set('source', song.source || (podcastMode ? 'podcast' : 'songs'));
-        if (podcastMode) params.set('strict', 'true');
-        const data = await fetchJsonWithTimeout(
-          apiPath(`/api/stream?${params.toString()}`),
-          nativeAndroid ? 14000 : 10000
-        );
-        if (data?.streamUrl) return data.streamUrl;
-      } catch {}
+    const cachedStream = streamUrlCacheRef.current.get(key) || localStorage.getItem(`sonix_stream_${key}`);
+    if (cachedStream && /^https?:\/\//i.test(cachedStream)) {
+      return cachedStream;
     }
 
-    if (podcastMode) return null;
-
-    if (videoId) {
-      try {
-        const data = await fetchJsonWithTimeout(
-          apiPath(`/api/yt-stream?videoId=${encodeURIComponent(videoId)}`),
-          nativeAndroid ? 15000 : 10000
-        );
-        if (data?.streamUrl) return data.streamUrl;
-      } catch {}
+    if (pendingStreamResolveRef.current.has(key)) {
+      return pendingStreamResolveRef.current.get(key);
     }
 
-    try {
-      const q = `${song.title || ''} ${song.artist || ''}`.trim();
-      if (q) {
-        const data = await fetchJsonWithTimeout(
-          apiPath(`/api/youtube-search?q=${encodeURIComponent(q)}&stream=true`),
-          nativeAndroid ? 12000 : 9000
-        );
-        if (data?.streamUrl) return data.streamUrl;
+    const resolverTask = (async () => {
+      let resolved = null;
+
+      if (song.url && /^https?:\/\//i.test(song.url)) {
+        try {
+          const params = new URLSearchParams();
+          params.set('url', song.url);
+          params.set('title', song.title || '');
+          params.set('artist', song.artist || '');
+          params.set('type', podcastMode ? 'podcast' : 'song');
+          params.set('source', song.source || (podcastMode ? 'podcast' : 'songs'));
+          if (podcastMode) params.set('strict', 'true');
+          const data = await fetchJsonWithTimeout(
+            apiPath(`/api/stream?${params.toString()}`),
+            nativeAndroid ? 14000 : 10000
+          );
+          if (data?.streamUrl) {
+            resolved = data.streamUrl;
+          }
+        } catch {}
       }
-    } catch {}
 
-    return null;
+      if (!resolved && podcastMode) {
+        // Some podcast records contain artwork/image URLs instead of audio feeds.
+        // Fall back to title-based stream lookup so playback still works.
+        try {
+          const q = `${song.title || ''} ${song.artist || ''} podcast episode`.trim();
+          if (q) {
+            const ytData = await fetchJsonWithTimeout(
+              apiPath(`/api/youtube-search?q=${encodeURIComponent(q)}&stream=true`),
+              preferFast ? 7000 : 10000
+            );
+            if (ytData?.streamUrl) {
+              resolved = ytData.streamUrl;
+            }
+          }
+        } catch {}
+
+        if (!resolved && song.url && isLikelyImageUrl(song.url)) {
+          try {
+            const q = `${song.title || ''} podcast`.trim();
+            if (q) {
+              const ytData = await fetchJsonWithTimeout(
+                apiPath(`/api/youtube-search?q=${encodeURIComponent(q)}&stream=true`),
+                preferFast ? 7000 : 10000
+              );
+              if (ytData?.streamUrl) {
+                resolved = ytData.streamUrl;
+              }
+            }
+          } catch {}
+        }
+      }
+
+      if (!resolved && !podcastMode && videoId) {
+        try {
+          const data = await fetchJsonWithTimeout(
+            apiPath(`/api/yt-stream?videoId=${encodeURIComponent(videoId)}`),
+            nativeAndroid ? 15000 : 10000
+          );
+          if (data?.streamUrl) {
+            resolved = data.streamUrl;
+          }
+        } catch {}
+      }
+
+      if (!resolved && !podcastMode) {
+        try {
+          const q = `${song.title || ''} ${song.artist || ''}`.trim();
+          if (q) {
+            const data = await fetchJsonWithTimeout(
+              apiPath(`/api/youtube-search?q=${encodeURIComponent(q)}&stream=true`),
+              nativeAndroid ? 12000 : 9000
+            );
+            if (data?.streamUrl) {
+              resolved = data.streamUrl;
+            }
+          }
+        } catch {}
+      }
+
+      if (resolved && /^https?:\/\//i.test(resolved)) {
+        streamUrlCacheRef.current.set(key, resolved);
+        try { localStorage.setItem(`sonix_stream_${key}`, resolved); } catch {}
+      }
+
+      return resolved;
+    })().finally(() => {
+      pendingStreamResolveRef.current.delete(key);
+    });
+
+    pendingStreamResolveRef.current.set(key, resolverTask);
+    return resolverTask;
   }
 
   async function switchToVideoMode() {
