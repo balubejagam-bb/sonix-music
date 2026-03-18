@@ -669,7 +669,11 @@ export default function Home() {
         if (!isActuallyPlaying && currentSong) {
           if (nativeAndroid) {
             const now = Date.now();
-            if (now - nativeLastResumeAtRef.current > 3500) {
+            if (
+              nativeTrackLoadedRef.current &&
+              !isLoadingSongRef.current &&
+              now - nativeLastResumeAtRef.current > 6000
+            ) {
               nativeLastResumeAtRef.current = now;
               NativeMusicPlayer.resume().catch(() => {});
             }
@@ -736,7 +740,14 @@ export default function Home() {
     if (nativeAndroid) {
       const stateListener = NativeMusicPlayer.addListener('onStateChanged', (res) => {
         if (res) {
-          yt.updateNativeTime(res.currentTime || 0, res.duration || 0);
+          // Native state events can be partial; do not force-reset timer to 0.
+          const nextCurrentTime = typeof res.currentTime === 'number' && !Number.isNaN(res.currentTime)
+            ? res.currentTime
+            : undefined;
+          const nextDuration = typeof res.duration === 'number' && res.duration > 0
+            ? res.duration
+            : undefined;
+          yt.updateNativeTime(nextCurrentTime, nextDuration);
 
             if (typeof res.isPlaying === 'boolean') {
               // STATE_BUFFERING = 2
@@ -749,7 +760,14 @@ export default function Home() {
               }
             }
 
-          if (res.playbackState === 4) {
+          // STATE_ENDED = 4; guard against false positives from transient states.
+          if (
+            res.playbackState === 4 &&
+            typeof res.duration === 'number' &&
+            typeof res.currentTime === 'number' &&
+            res.duration > 0 &&
+            res.currentTime >= Math.max(0, res.duration - 1)
+          ) {
              handleNext();
           }
         }
