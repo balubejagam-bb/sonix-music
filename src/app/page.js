@@ -336,7 +336,7 @@ function useYouTubePlayer() {
 
     if (!isReady()) {
       pendingVideoIdRef.current = videoId;
-      return false;
+      return true;
     }
     try {
       playerRef.current.loadVideoById(videoId);
@@ -374,9 +374,11 @@ function useYouTubePlayer() {
         console.warn('Audio play failed, fallback to YT:', e);
         if (fallbackVideoId && isValidYouTubeVideoId(fallbackVideoId)) {
           try {
-            playVideoById(fallbackVideoId);
-            setIsPlaying(true);
-            return true;
+            const started = playVideoById(fallbackVideoId);
+            if (started) {
+              setIsPlaying(true);
+              return true;
+            }
           } catch {}
         }
         return false;
@@ -1855,6 +1857,30 @@ export default function Home() {
       setNativeIsPlaying(false);
       nativeTrackLoadedRef.current = false;
       nativeShouldPlayRef.current = false;
+
+      // On Android, once native audio handoff fails, prefer the YouTube player
+      // instead of retrying another fragile direct-stream path.
+      if (nativeAndroid && forceWebFallback && vId) {
+        await enforceEngineLock('web-video');
+        const started = yt.playVideoById(vId);
+        if (!started) {
+          await yt.searchAndPlay(playableSong.title || '', playableSong.artist || '', playableSong.type || 'song');
+        }
+        activeEngineRef.current = 'web-video';
+        isLoadingSongRef.current = false;
+        setIsLoadingSong(false);
+        setLoadingSongKey(null);
+
+        setRecentlyPlayed(prev => {
+          const filtered = prev.filter(s => songKey(s) !== songKey(playableSong));
+          const next = [playableSong, ...filtered].slice(0, 20);
+          try { localStorage.setItem('sonix_recent', JSON.stringify(next)); } catch {}
+          return next;
+        });
+
+        prefetchUpcomingVideoIds();
+        return;
+      }
       
       // Audio-first UX: only load iframe video when user explicitly chooses Video mode.
       if (vId) {
