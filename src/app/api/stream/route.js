@@ -49,8 +49,12 @@ export async function GET(request) {
     // Fallback: YouTube via Invidious/Piped (songs only)
     if (title) {
       const yt = await getYouTubeStream(title, artist);
-      if (yt?.streamUrl) {
-        return NextResponse.json({ streamUrl: yt.streamUrl, source: 'youtube', videoId: yt.videoId || null });
+      if (yt?.streamUrl || yt?.videoId) {
+        return NextResponse.json({
+          streamUrl: yt.streamUrl || null,
+          source: yt.streamUrl ? 'youtube' : 'youtube-video-fallback',
+          videoId: yt.videoId || null,
+        });
       }
     }
 
@@ -203,7 +207,7 @@ async function resolveViaSaavnApi(title, artist = '') {
     const data = await res.json();
     const list = Array.isArray(data) ? data : [data];
     const titleNorm = normalizeText(title);
-    const artistNorm = normalizeText(artist);
+    const artistNorm = normalizeText(cleanedArtist || artist);
     const ranked = list
       .filter(Boolean)
       .map((song) => ({ song, score: scoreSaavnCandidate(song, titleNorm, artistNorm) }))
@@ -281,7 +285,9 @@ async function getYouTubeStream(title, artist) {
   try {
     const isPodcast = title.toLowerCase().includes('podcast') || artist.toLowerCase().includes('podcast');
     const suffix = isPodcast ? '' : ' official audio';
-    const query = `${title} ${artist}${suffix}`.trim();
+    const cleanedArtist = normalizeArtist(artist);
+    const query = `${title} ${cleanedArtist || artist}${suffix}`.trim();
+    let lastCandidateVideoId = null;
 
     // Try Invidious instances first
     for (const instance of INVIDIOUS_INSTANCES.slice(0, 3)) {
@@ -295,6 +301,7 @@ async function getYouTubeStream(title, artist) {
         if (Array.isArray(results) && results.length > 0) {
           const bestVideo = selectBestVideoCandidate(results, title, artist);
           if (bestVideo?.videoId) {
+            lastCandidateVideoId = bestVideo.videoId;
             const streamUrl = await resolveYouTubeAudioStream(bestVideo.videoId);
             if (streamUrl) {
               return { videoId: bestVideo.videoId, streamUrl };
@@ -318,6 +325,7 @@ async function getYouTubeStream(title, artist) {
           const bestItem = selectBestPipedCandidate(items, title, artist);
           const videoId = bestItem?.url?.split('v=')[1]?.split('&')[0];
           if (videoId) {
+            lastCandidateVideoId = videoId;
             const streamUrl = await resolveYouTubeAudioStream(videoId);
             if (streamUrl) {
               return { videoId, streamUrl };
@@ -325,6 +333,10 @@ async function getYouTubeStream(title, artist) {
           }
         }
       } catch {}
+    }
+
+    if (lastCandidateVideoId) {
+      return { videoId: lastCandidateVideoId, streamUrl: null };
     }
 
     return null;
@@ -336,7 +348,8 @@ async function getYouTubeStream(title, artist) {
 
 function selectBestVideoCandidate(results, title, artist) {
   const titleNorm = normalizeText(title);
-  const artistNorm = normalizeText(artist);
+  const artistNorm = normalizeText(normalizeArtist(artist));
+  const titleTokens = titleNorm.split(' ').filter((tok) => tok.length > 2);
 
   const scored = (results || [])
     .filter((r) => r?.videoId)
@@ -344,9 +357,11 @@ function selectBestVideoCandidate(results, title, artist) {
       const t = normalizeText(r?.title || '');
       const a = normalizeText(r?.author || '');
       let score = 0;
+      const titleOverlap = titleTokens.filter((tok) => t.includes(tok)).length;
       if (titleNorm && t) {
         if (t.includes(titleNorm) || titleNorm.includes(t)) score += 8;
-        score += titleNorm.split(' ').filter((tok) => tok.length > 2 && t.includes(tok)).length;
+        score += titleOverlap;
+        if (titleTokens.length > 0 && titleOverlap === 0) score -= 20;
       }
       if (artistNorm && a) {
         if (a.includes(artistNorm) || artistNorm.includes(a)) score += 4;
@@ -361,7 +376,8 @@ function selectBestVideoCandidate(results, title, artist) {
 
 function selectBestPipedCandidate(items, title, artist) {
   const titleNorm = normalizeText(title);
-  const artistNorm = normalizeText(artist);
+  const artistNorm = normalizeText(normalizeArtist(artist));
+  const titleTokens = titleNorm.split(' ').filter((tok) => tok.length > 2);
 
   const scored = (items || [])
     .filter((i) => i?.url?.includes('v='))
@@ -369,9 +385,11 @@ function selectBestPipedCandidate(items, title, artist) {
       const t = normalizeText(i?.title || '');
       const a = normalizeText(i?.uploaderName || i?.uploader || '');
       let score = 0;
+      const titleOverlap = titleTokens.filter((tok) => t.includes(tok)).length;
       if (titleNorm && t) {
         if (t.includes(titleNorm) || titleNorm.includes(t)) score += 8;
-        score += titleNorm.split(' ').filter((tok) => tok.length > 2 && t.includes(tok)).length;
+        score += titleOverlap;
+        if (titleTokens.length > 0 && titleOverlap === 0) score -= 20;
       }
       if (artistNorm && a) {
         if (a.includes(artistNorm) || artistNorm.includes(a)) score += 4;

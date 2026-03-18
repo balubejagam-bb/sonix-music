@@ -430,7 +430,17 @@ function fmt(s) {
 function normalizeVideoId(value) {
   if (typeof value !== 'string') return null;
   const v = value.trim();
-  return /^[A-Za-z0-9_-]{11}$/.test(v) ? v : null;
+  if (/^[A-Za-z0-9_-]{11}$/.test(v)) return v;
+  try {
+    if (v.includes('youtube.com') || v.includes('youtu.be')) {
+      const u = new URL(v);
+      const fromQuery = u.searchParams.get('v');
+      if (fromQuery && /^[A-Za-z0-9_-]{11}$/.test(fromQuery)) return fromQuery;
+      const maybePathId = u.pathname.split('/').filter(Boolean).pop();
+      if (maybePathId && /^[A-Za-z0-9_-]{11}$/.test(maybePathId)) return maybePathId;
+    }
+  } catch {}
+  return null;
 }
 
 // Decode HTML entities like &quot; &amp; &#39;
@@ -472,30 +482,9 @@ function GlobalErrorHandler() {
       }
     };
 
-    const handleDOMContentError = (event) => {
-      const target = event.target || {};
-      const listenerOptions = target.__proto__?.toString();
-      // Suppress passive listener warnings
-      if (event.type?.includes('passive') || event.message?.includes('preventDefault')) {
-        try { event.preventDefault?.(); } catch {}
-      }
-    };
-
     // Use { capture: true } to intercept at capture phase before other handlers
     window.addEventListener('error', handleGlobalError, { capture: true, passive: false });
     window.addEventListener('unhandledrejection', handleGlobalError, { capture: true, passive: false });
-    
-    // Suppress passive event listener warnings
-    if (document) {
-      const origAdd = EventTarget.prototype.addEventListener;
-      EventTarget.prototype.addEventListener = function(type, listener, options) {
-        // Convert passive events that preventDefault to non-passive
-        if (typeof options === 'object' && options.passive === true) {
-          options = { ...options, passive: false };
-        }
-        return origAdd.call(this, type, listener, options);
-      };
-    }
 
     return () => {
       window.removeEventListener('error', handleGlobalError, { capture: true, passive: false });
@@ -2794,6 +2783,7 @@ export default function Home() {
 
   return (
     <div className={`app-layout ${showLoginNudge ? 'has-login-banner' : ''}`}>
+      <GlobalErrorHandler />
       {/* Mobile Menu Toggle */}
       <button
         className={`mobile-menu-btn ${mobileMenuOpen ? 'hidden' : ''}`}
