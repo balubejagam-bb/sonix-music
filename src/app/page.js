@@ -807,6 +807,43 @@ export default function Home() {
 
   // ───── Playback watchdog (keep background playing) ─────
   useEffect(() => {
+    const handoffToNativeBackground = async () => {
+      if (!nativeAndroid || !currentSong || !canUseNativePlugins()) return false;
+
+      const resumeAt = yt.currentTime || 0;
+      const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
+      if (!videoId) return false;
+
+      const streamUrl = await resolveAudioStreamForSong(currentSong, videoId, { prefetch: true });
+      if (!streamUrl) return false;
+
+      await NativeMusicPlayer.playQueue({
+        queue: [{
+          url: streamUrl,
+          title: currentSong.title || 'Unknown Track',
+          artist: currentSong.artist || 'Unknown Artist',
+          album: currentSong.album || 'Sonix Music',
+          artwork: currentSong.image || currentSong.thumbnail || '',
+        }],
+        index: 0,
+        shuffle: shuffleEnabled,
+        repeatMode,
+      });
+
+      if (resumeAt > 0) {
+        NativeMusicPlayer.seekTo({ positionMs: resumeAt * 1000 }).catch(() => {});
+      }
+
+      yt.pause();
+      setCurrentSong(prev => prev ? { ...prev, url: streamUrl, videoId } : prev);
+      nativeTrackLoadedRef.current = true;
+      nativeShouldPlayRef.current = true;
+      setOptimisticPlaying(true);
+      setNativeIsPlaying(true);
+      activeEngineRef.current = 'native-audio';
+      return true;
+    };
+
     const handleVisibility = async () => {
       if (document.hidden) {
         console.log('[Sonix] App backgrounded. Ensuring playback stability.');
@@ -827,32 +864,14 @@ export default function Home() {
           }
         }
         
-        // If we are playing a video in the foreground, it will likely pause.
-        // Transfer to native background audio if possible.
-        if (yt.isPlaying && !nativeIsPlaying && currentSong?.videoId) {
-           const time = yt.currentTime;
-           const vid = currentSong.videoId;
-           
-           // If on Android, try to transition to native player
-           if (nativeAndroid) {
-             try {
-               const res = await fetch(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(vid)}`));
-               const data = await res.json();
-               if (data.streamUrl) {
-                 yt.pause();
-                 await NativeMusicPlayer.playQueue({
-                   queue: [{ url: data.streamUrl, title: currentSong.title, artist: currentSong.artist, artwork: currentSong.image || '' }],
-                   index: 0
-                 });
-                NativeMusicPlayer.seekTo({ positionMs: time * 1000 });
-                nativeTrackLoadedRef.current = true;
-                nativeShouldPlayRef.current = true;
-                setOptimisticPlaying(true);
-                 setNativeIsPlaying(true);
-               activeEngineRef.current = 'native-audio';
-               }
-             } catch(e) {}
-           }
+        if (
+          nativeAndroid &&
+          currentSong &&
+          (yt.isPlaying || optimisticPlayingRef.current || activeEngineRef.current !== 'native-audio')
+        ) {
+          try {
+            await handoffToNativeBackground();
+          } catch {}
         } else if (
           !nativeAndroid &&
           currentSong &&
@@ -906,6 +925,10 @@ export default function Home() {
             nativeLastResumeAtRef.current = now;
             NativeMusicPlayer.resume().catch(() => {});
           }
+        } else if (currentSong) {
+          try {
+            await handoffToNativeBackground();
+          } catch {}
         }
       } else {
         console.log('[Sonix] Native app foregrounded. Syncing states.');
@@ -1087,14 +1110,26 @@ export default function Home() {
           handleNext();
         } else if (action === 'previous') {
           handlePrev();
-        } else if (action === 'play' && nativeTrackLoadedRef.current) {
+        } else if (action === 'play' && nativeTrackLoadedRef.current && activeEngineRef.current === 'native-audio') {
           setNativeIsPlaying(true);
           setOptimisticPlaying(true);
           nativeShouldPlayRef.current = true;
-        } else if (action === 'pause' && nativeTrackLoadedRef.current) {
+          NativeMusicPlayer.resume().catch(() => {});
+        } else if (action === 'pause' && nativeTrackLoadedRef.current && activeEngineRef.current === 'native-audio') {
           setNativeIsPlaying(false);
           setOptimisticPlaying(false);
           nativeShouldPlayRef.current = false;
+          NativeMusicPlayer.pause().catch(() => {});
+        } else if (action === 'play') {
+          setOptimisticPlaying(true);
+          if (activeEngineRef.current === 'web-video' && currentSong?.videoId) {
+            yt.playVideoById(currentSong.videoId);
+          } else {
+            yt.play();
+          }
+        } else if (action === 'pause') {
+          setOptimisticPlaying(false);
+          yt.pause();
         }
       });
 
