@@ -48,8 +48,10 @@ export async function GET(request) {
 
     // Fallback: YouTube via Invidious/Piped (songs only)
     if (title) {
-      const ytStream = await getYouTubeStream(title, artist);
-      if (ytStream) return NextResponse.json({ streamUrl: ytStream, source: 'youtube' });
+      const yt = await getYouTubeStream(title, artist);
+      if (yt?.streamUrl) {
+        return NextResponse.json({ streamUrl: yt.streamUrl, source: 'youtube', videoId: yt.videoId || null });
+      }
     }
 
     return NextResponse.json({ error: 'Could not resolve stream' }, { status: 404 });
@@ -190,7 +192,8 @@ function extractTitleFromUrl(url) {
 }
 
 async function resolveViaSaavnApi(title, artist = '') {
-  const query = artist ? `${title} ${artist}` : title;
+  const cleanedArtist = normalizeArtist(artist);
+  const query = cleanedArtist ? `${title} ${cleanedArtist}` : title;
   try {
     const res = await fetch(
       `https://saavnapi-nine.vercel.app/result/?query=${encodeURIComponent(query)}`,
@@ -214,6 +217,18 @@ async function resolveViaSaavnApi(title, artist = '') {
     console.error('saavnapi resolve error:', e);
     return null;
   }
+}
+
+function normalizeArtist(artist = '') {
+  const normalized = normalizeText(artist);
+  if (!normalized) return '';
+  // Split merged names like "A.R.RahmanSPB" into tokenized form for better search.
+  const spaced = String(artist)
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/[\-|/]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return spaced || normalized;
 }
 
 function normalizeText(v = '') {
@@ -278,9 +293,11 @@ async function getYouTubeStream(title, artist) {
         if (!res.ok) continue;
         const results = await res.json();
         if (Array.isArray(results) && results.length > 0) {
-          for (const video of results) {
-            if (video.videoId && video.videoThumbnails?.length > 0) {
-              return `https://www.youtube.com/watch?v=${video.videoId}`;
+          const bestVideo = selectBestVideoCandidate(results, title, artist);
+          if (bestVideo?.videoId) {
+            const streamUrl = await resolveYouTubeAudioStream(bestVideo.videoId);
+            if (streamUrl) {
+              return { videoId: bestVideo.videoId, streamUrl };
             }
           }
         }
@@ -298,9 +315,13 @@ async function getYouTubeStream(title, artist) {
         const data = await res.json();
         const items = (data.items || []).filter((i) => i?.url?.includes('/watch'));
         if (items.length > 0) {
-          const videoId = items[0].url.split('v=')[1]?.split('&')[0];
+          const bestItem = selectBestPipedCandidate(items, title, artist);
+          const videoId = bestItem?.url?.split('v=')[1]?.split('&')[0];
           if (videoId) {
-            return `https://www.youtube.com/watch?v=${videoId}`;
+            const streamUrl = await resolveYouTubeAudioStream(videoId);
+            if (streamUrl) {
+              return { videoId, streamUrl };
+            }
           }
         }
       } catch {}
@@ -311,4 +332,99 @@ async function getYouTubeStream(title, artist) {
     console.error('getYouTubeStream error:', e);
     return null;
   }
+}
+
+function selectBestVideoCandidate(results, title, artist) {
+  const titleNorm = normalizeText(title);
+  const artistNorm = normalizeText(artist);
+
+  const scored = (results || [])
+    .filter((r) => r?.videoId)
+    .map((r) => {
+      const t = normalizeText(r?.title || '');
+      const a = normalizeText(r?.author || '');
+      let score = 0;
+      if (titleNorm && t) {
+        if (t.includes(titleNorm) || titleNorm.includes(t)) score += 8;
+        score += titleNorm.split(' ').filter((tok) => tok.length > 2 && t.includes(tok)).length;
+      }
+      if (artistNorm && a) {
+        if (a.includes(artistNorm) || artistNorm.includes(a)) score += 4;
+        score += artistNorm.split(' ').filter((tok) => tok.length > 2 && a.includes(tok)).length;
+      }
+      return { r, score };
+    })
+    .sort((x, y) => y.score - x.score);
+
+  return scored[0]?.r || results?.[0] || null;
+}
+
+function selectBestPipedCandidate(items, title, artist) {
+  const titleNorm = normalizeText(title);
+  const artistNorm = normalizeText(artist);
+
+  const scored = (items || [])
+    .filter((i) => i?.url?.includes('v='))
+    .map((i) => {
+      const t = normalizeText(i?.title || '');
+      const a = normalizeText(i?.uploaderName || i?.uploader || '');
+      let score = 0;
+      if (titleNorm && t) {
+        if (t.includes(titleNorm) || titleNorm.includes(t)) score += 8;
+        score += titleNorm.split(' ').filter((tok) => tok.length > 2 && t.includes(tok)).length;
+      }
+      if (artistNorm && a) {
+        if (a.includes(artistNorm) || artistNorm.includes(a)) score += 4;
+        score += artistNorm.split(' ').filter((tok) => tok.length > 2 && a.includes(tok)).length;
+      }
+      return { i, score };
+    })
+    .sort((x, y) => y.score - x.score);
+
+  return scored[0]?.i || items?.[0] || null;
+}
+
+async function resolveYouTubeAudioStream(videoId) {
+  const INVIDIOUS_STREAM = [
+    'https://inv.nadeko.net',
+    'https://invidious.nerdvpn.de',
+    'https://invidious.privacyredirect.com',
+    'https://invidious.protokolla.fi',
+    'https://yt.artemislena.eu',
+  ];
+  const PIPED_STREAM = [
+    'https://pipedapi.kavin.rocks',
+    'https://pipedapi.adminforge.de',
+    'https://watchapi.whatever.social',
+    'https://api.piped.yt',
+  ];
+
+  for (const instance of INVIDIOUS_STREAM) {
+    try {
+      const res = await fetch(
+        `${instance}/api/v1/videos/${videoId}?fields=adaptiveFormats`,
+        { signal: AbortSignal.timeout(4000), headers: { 'Accept': 'application/json' } }
+      );
+      if (!res.ok) continue;
+      const data = await res.json();
+      const audio = (data.adaptiveFormats || [])
+        .filter((f) => f?.type?.includes('audio') && f?.url)
+        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+      if (audio?.url) return audio.url;
+    } catch {}
+  }
+
+  for (const instance of PIPED_STREAM) {
+    try {
+      const res = await fetch(`${instance}/streams/${videoId}`, { signal: AbortSignal.timeout(4000) });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const best = (data.audioStreams || [])
+        .filter((s) => s?.url)
+        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+      if (best?.url) return best.url;
+    } catch {}
+  }
+
+  return null;
 }

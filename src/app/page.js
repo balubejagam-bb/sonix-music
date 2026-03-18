@@ -1761,6 +1761,14 @@ export default function Home() {
             );
             if (isStale()) return;
             if (data.streamUrl) streamUrl = data.streamUrl;
+            if (data.videoId) {
+              const canonicalVideoId = normalizeVideoId(data.videoId);
+              if (canonicalVideoId) {
+                videoId = canonicalVideoId;
+                videoIdCacheRef.current.set(key, canonicalVideoId);
+                try { localStorage.setItem(`yt_vid_${key}`, canonicalVideoId); } catch {}
+              }
+            }
           }
 
           if (!streamUrl && isPodcastItem(song)) {
@@ -1777,7 +1785,7 @@ export default function Home() {
               try {
                 const data = await fetchJsonWithTimeout(apiPath(`/api/youtube-search?q=${encodeURIComponent(query)}`), 12000);
                 if (isStale()) return;
-                if (data.videoId) videoId = data.videoId;
+                if (data.videoId) videoId = normalizeVideoId(data.videoId) || videoId;
               } catch {}
             }
 
@@ -1798,7 +1806,7 @@ export default function Home() {
                   12000
                 );
                 if (isStale()) return;
-                if (data.videoId) videoId = data.videoId;
+                if (data.videoId) videoId = normalizeVideoId(data.videoId) || videoId;
                 if (data.streamUrl) streamUrl = data.streamUrl;
               } catch {}
             }
