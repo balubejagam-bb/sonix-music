@@ -749,16 +749,23 @@ export default function Home() {
             : undefined;
           yt.updateNativeTime(nextCurrentTime, nextDuration);
 
-            if (typeof res.isPlaying === 'boolean') {
-              // STATE_BUFFERING = 2
-              if (res.playbackState === 2 && (optimisticPlaying || nativeShouldPlayRef.current)) {
-                 // Keep UI playing while buffering
-                 setNativeIsPlaying(true);
-              } else {
-                 setNativeIsPlaying(res.isPlaying);
-                 setOptimisticPlaying(false);
+          if (typeof res.isPlaying === 'boolean') {
+            const shouldKeepPlayingUi = nativeShouldPlayRef.current || optimisticPlaying;
+
+            // STATE_BUFFERING = 2, keep controls in playing state while startup/buffer happens.
+            if (res.playbackState === 2 && shouldKeepPlayingUi) {
+              setNativeIsPlaying(true);
+              setOptimisticPlaying(true);
+            } else if (res.isPlaying) {
+              setNativeIsPlaying(true);
+              setOptimisticPlaying(true);
+            } else {
+              setNativeIsPlaying(false);
+              if (!nativeShouldPlayRef.current || res.playbackState === 4) {
+                setOptimisticPlaying(false);
               }
             }
+          }
 
           // STATE_ENDED = 4; guard against false positives from transient states.
           if (
@@ -807,14 +814,27 @@ export default function Home() {
         try {
           const res = await NativeMusicPlayer.getPosition();
           if (res && res.currentTime !== undefined) {
-             yt.updateNativeTime(res.currentTime, res.duration || 0);
+             const nextCurrentTime = typeof res.currentTime === 'number' && !Number.isNaN(res.currentTime)
+               ? res.currentTime
+               : undefined;
+             const nextDuration = typeof res.duration === 'number' && res.duration > 0
+               ? res.duration
+               : undefined;
+             yt.updateNativeTime(nextCurrentTime, nextDuration);
              if (typeof res.isPlaying === 'boolean') {
-                 if (res.playbackState === 2 && (optimisticPlaying || nativeShouldPlayRef.current)) {
-                    setNativeIsPlaying(true);
-                 } else {
-                    setNativeIsPlaying(res.isPlaying);
+               if (res.playbackState === 2 && (optimisticPlaying || nativeShouldPlayRef.current)) {
+                 setNativeIsPlaying(true);
+                 setOptimisticPlaying(true);
+               } else if (res.isPlaying) {
+                 setNativeIsPlaying(true);
+                 setOptimisticPlaying(true);
+               } else {
+                 setNativeIsPlaying(false);
+                 if (!nativeShouldPlayRef.current || res.playbackState === 4) {
+                   setOptimisticPlaying(false);
                  }
                }
+             }
             }
           } catch (e) {}
         }, 1000);
@@ -1313,6 +1333,11 @@ export default function Home() {
     const key = songKey(song);
     setIsLoadingSong(true);
     setLoadingSongKey(key);
+
+    // Reset progress immediately when switching tracks to prevent old-time flicker.
+    const initialDuration = Math.max(0, Number(song?.duration || 0));
+    yt.updateNativeTime(0, initialDuration > 0 ? initialDuration : undefined);
+    setOptimisticPlaying(true);
 
     if (playStartTimeoutRef.current) {
       clearTimeout(playStartTimeoutRef.current);
@@ -2005,7 +2030,7 @@ export default function Home() {
   }, [yt.isPlaying]);
 
   useEffect(() => {
-    if (nativeAndroid) {
+    if (nativeAndroid && !nativeShouldPlayRef.current && !nativeIsPlaying) {
       setOptimisticPlaying(false);
     }
   }, [nativeAndroid, nativeIsPlaying]);
