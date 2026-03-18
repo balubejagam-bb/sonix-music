@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Capacitor, registerPlugin } from '@capacitor/core';
+import { Capacitor, CapacitorHttp, registerPlugin } from '@capacitor/core';
 import { App } from '@capacitor/app';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { useAuth } from '@/lib/authContext';
@@ -590,6 +590,10 @@ export default function Home() {
   const lastNativeTrackKeyRef = useRef(null);
   const lastNativeActionRef = useRef({ action: '', at: 0 });
   const lastNativeProgressRef = useRef({ time: 0, at: 0 });
+  const nativePlaybackSnapshotRef = useRef({ playbackState: 0, playWhenReady: false, updatedAt: 0 });
+  const lastWebProgressRef = useRef({ time: 0, at: 0 });
+  const lastStallRecoveryRef = useRef({ at: 0, mode: '' });
+  const lastStartupRecoveryRef = useRef({ at: 0, key: '', attempts: 0 });
   const nativeTrackLoadedRef = useRef(false);
   const activeEngineRef = useRef('none'); // none | native-audio | web-audio | web-video
   const nativeFailureRef = useRef({
@@ -610,6 +614,48 @@ export default function Home() {
     if (!withinSwitchWindow) return true;
     // Ignore carry-over progress from the previous track during handoff.
     return nextCurrentTime <= 4;
+  }
+
+  function updateNativePlaybackSnapshot(res) {
+    if (!res || typeof res !== 'object') return;
+    nativePlaybackSnapshotRef.current = {
+      playbackState:
+        typeof res.playbackState === 'number'
+          ? res.playbackState
+          : nativePlaybackSnapshotRef.current.playbackState,
+      playWhenReady:
+        typeof res.playWhenReady === 'boolean'
+          ? res.playWhenReady
+          : nativePlaybackSnapshotRef.current.playWhenReady,
+      updatedAt: Date.now(),
+    };
+  }
+
+  function shouldForceNativeRecovery(now = Date.now()) {
+    if (
+      !nativeTrackLoadedRef.current ||
+      !nativeShouldPlayRef.current ||
+      isLoadingSongRef.current ||
+      activeEngineRef.current !== 'native-audio'
+    ) {
+      return false;
+    }
+
+    const recentNativeProgress = now - lastNativeProgressRef.current.at < 6500;
+    const recentTrackSwitch = now - trackSwitchAtRef.current < 8000;
+    const recentResume = now - nativeLastResumeAtRef.current < 8000;
+    const nativeSnapshot = nativePlaybackSnapshotRef.current;
+    const bufferingOrReady =
+      nativeSnapshot.playbackState === 2 || nativeSnapshot.playbackState === 3;
+    const waitingForNativeStart =
+      bufferingOrReady &&
+      (nativeSnapshot.playWhenReady || recentNativeProgress || nativeShouldPlayRef.current);
+
+    if (recentNativeProgress || recentTrackSwitch || recentResume || waitingForNativeStart) {
+      return false;
+    }
+
+    return true;
   }
 
   function sleep(ms) {
@@ -678,6 +724,30 @@ export default function Home() {
   }
 
   async function fetchJsonWithTimeout(url, timeoutMs = 10000) {
+    if (nativeAndroid) {
+      const res = await CapacitorHttp.request({
+        url,
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          'Cache-Control': 'no-cache',
+        },
+        connectTimeout: timeoutMs,
+        readTimeout: timeoutMs,
+      });
+      if (!res || res.status < 200 || res.status >= 300) {
+        throw new Error(`HTTP ${res?.status || 0}`);
+      }
+      if (typeof res.data === 'string') {
+        try {
+          return JSON.parse(res.data);
+        } catch {
+          throw new Error('Invalid JSON response');
+        }
+      }
+      return res.data;
+    }
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -811,6 +881,14 @@ export default function Home() {
 
   // ───── Playback watchdog (keep background playing) ─────
   useEffect(() => {
+    if (nativeAndroid) return;
+    if (typeof yt.currentTime !== 'number' || Number.isNaN(yt.currentTime)) return;
+    if (yt.currentTime > lastWebProgressRef.current.time + 0.15) {
+      lastWebProgressRef.current = { time: yt.currentTime, at: Date.now() };
+    }
+  }, [yt.currentTime, nativeAndroid]);
+
+  useEffect(() => {
     const handoffToNativeBackground = async () => {
       if (!nativeAndroid || !currentSong || !canUseNativePlugins()) return false;
 
@@ -848,8 +926,8 @@ export default function Home() {
       return true;
     };
 
-    const handleVisibility = async () => {
-      if (document.hidden) {
+      const handleVisibility = async () => {
+        if (document.hidden) {
         console.log('[Sonix] App backgrounded. Ensuring playback stability.');
         const bg = await getBackgroundMode();
         if (bg) bg.enable();
@@ -862,7 +940,7 @@ export default function Home() {
           !nativeIsPlaying
         ) {
           const now = Date.now();
-          if (now - nativeLastResumeAtRef.current > 3000) {
+          if (shouldForceNativeRecovery(now)) {
             nativeLastResumeAtRef.current = now;
             NativeMusicPlayer.resume().catch(() => {});
           }
@@ -925,7 +1003,7 @@ export default function Home() {
           !nativeIsPlaying
         ) {
           const now = Date.now();
-          if (now - nativeLastResumeAtRef.current > 3000) {
+          if (shouldForceNativeRecovery(now)) {
             nativeLastResumeAtRef.current = now;
             NativeMusicPlayer.resume().catch(() => {});
           }
@@ -958,6 +1036,8 @@ export default function Home() {
       // Logic for background persistence
       const shouldBePlaying = nativeAndroid ? nativeShouldPlayRef.current : optimisticPlaying;
       const isActuallyPlaying = nativeAndroid ? nativeIsPlaying : yt.isPlaying;
+      const now = Date.now();
+      const canRecoverNow = now - lastStallRecoveryRef.current.at > 7000;
       
       if (shouldBePlaying) {
         // 1. Ensure silent track is ALWAYS playing as an anchor (web only)
@@ -968,17 +1048,91 @@ export default function Home() {
         // 2. Re-poke main engine if it dropped
         if (!isActuallyPlaying && currentSong) {
           if (nativeAndroid) {
-            const now = Date.now();
-            if (
-              nativeTrackLoadedRef.current &&
-              !isLoadingSongRef.current &&
-              now - nativeLastResumeAtRef.current > 6000
-            ) {
+            if (shouldForceNativeRecovery(now)) {
               nativeLastResumeAtRef.current = now;
               NativeMusicPlayer.resume().catch(() => {});
             }
           } else {
             yt.play();
+          }
+        }
+
+        // 3. Recover from mid-track stalls where state says playing but progress is stuck.
+        if (currentSong && !isLoadingSongRef.current && canRecoverNow) {
+          const activeSongKey = songKey(currentSong);
+
+          if (now - trackSwitchAtRef.current > 10000) {
+            if (lastStartupRecoveryRef.current.key !== activeSongKey) {
+              lastStartupRecoveryRef.current = { at: 0, key: activeSongKey, attempts: 0 };
+            }
+
+            if (
+              lastStartupRecoveryRef.current.attempts < 2 &&
+              now - lastStartupRecoveryRef.current.at > 12000
+            ) {
+              const nativeStartupStuck =
+                nativeAndroid &&
+                activeEngineRef.current === 'native-audio' &&
+                nativeShouldPlayRef.current &&
+                lastNativeProgressRef.current.time <= 0.35 &&
+                (lastNativeProgressRef.current.at === 0 || now - lastNativeProgressRef.current.at > 9000);
+
+              const webStartupStuck =
+                !nativeAndroid &&
+                (activeEngineRef.current === 'web-audio' || activeEngineRef.current === 'web-video') &&
+                yt.currentTime <= 0.35 &&
+                (lastWebProgressRef.current.at === 0 || now - lastWebProgressRef.current.at > 9000);
+
+              if (nativeStartupStuck || webStartupStuck) {
+                lastStartupRecoveryRef.current = {
+                  at: now,
+                  key: activeSongKey,
+                  attempts: lastStartupRecoveryRef.current.attempts + 1,
+                };
+                lastStallRecoveryRef.current = {
+                  at: now,
+                  mode: nativeStartupStuck ? 'startup-native' : 'startup-web',
+                };
+                isLoadingSongRef.current = false;
+                playSongDirect(currentSong, queueRef.current?.length ? queueRef.current : null, true);
+                return;
+              }
+            }
+          }
+
+          if (nativeAndroid && activeEngineRef.current === 'native-audio' && nativeShouldPlayRef.current) {
+            const stalledNative =
+              lastNativeProgressRef.current.time > 2 &&
+              now - lastNativeProgressRef.current.at > 9000 &&
+              nativePlaybackSnapshotRef.current.playbackState !== 2;
+            if (stalledNative) {
+              lastStallRecoveryRef.current = { at: now, mode: 'native-audio' };
+              NativeMusicPlayer.pause()
+                .then(() => sleep(180))
+                .then(() => NativeMusicPlayer.resume())
+                .catch(() => NativeMusicPlayer.resume().catch(() => {}));
+            }
+          }
+
+          if (!nativeAndroid && (activeEngineRef.current === 'web-audio' || activeEngineRef.current === 'web-video')) {
+            const nearEnd = typeof yt.duration === 'number' && yt.duration > 0
+              ? yt.duration - yt.currentTime <= 2
+              : false;
+            const stalledWeb =
+              !nearEnd &&
+              yt.currentTime > 2 &&
+              now - lastWebProgressRef.current.at > 9000;
+
+            if (stalledWeb) {
+              lastStallRecoveryRef.current = { at: now, mode: activeEngineRef.current };
+              if (activeEngineRef.current === 'web-audio' && yt.audioElement) {
+                try { yt.audioElement.pause(); } catch {}
+                setTimeout(() => { yt.play(); }, 160);
+              } else {
+                try { yt.pause(); } catch {}
+                setTimeout(() => { yt.play(); }, 160);
+              }
+            }
           }
         }
       }
@@ -1044,6 +1198,7 @@ export default function Home() {
     if (nativeAndroid) {
       const stateListener = NativeMusicPlayer.addListener('onStateChanged', (res) => {
         if (res) {
+          updateNativePlaybackSnapshot(res);
           // Native state events can be partial; do not force-reset timer to 0.
           const nextCurrentTime = typeof res.currentTime === 'number' && !Number.isNaN(res.currentTime)
             ? res.currentTime
@@ -1157,6 +1312,7 @@ export default function Home() {
         try {
           const res = await NativeMusicPlayer.getPosition();
           if (res && res.currentTime !== undefined) {
+             updateNativePlaybackSnapshot(res);
              const nextCurrentTime = typeof res.currentTime === 'number' && !Number.isNaN(res.currentTime)
                ? res.currentTime
                : undefined;
@@ -1370,12 +1526,7 @@ export default function Home() {
         ...(options.genre && { genre: options.genre }),
         ...(options.source && options.source !== 'all' && { source: options.source }),
       });
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
-      const res = await fetch(apiPath(`/api/songs?${params}`), { signal: controller.signal });
-      clearTimeout(timeout);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      const data = await fetchJsonWithTimeout(apiPath(`/api/songs?${params}`), requestTimeoutMs);
       if (p === 1) { setSongs(data.songs || []); }
       else { setSongs(prev => [...prev, ...(data.songs || [])]); }
       setTotalSongs(data.total || 0);
@@ -1494,12 +1645,9 @@ export default function Home() {
 
   async function backgroundCache() {
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), nativeAndroid ? 9000 : 7000);
+      const requestTimeoutMs = nativeAndroid ? 9000 : 7000;
       const cacheLimit = nativeAndroid ? 500 : 1200;
-      const res = await fetch(apiPath(`/api/songs?page=1&limit=${cacheLimit}`), { signal: controller.signal });
-      clearTimeout(timeout);
-      const data = await res.json();
+      const data = await fetchJsonWithTimeout(apiPath(`/api/songs?page=1&limit=${cacheLimit}`), requestTimeoutMs);
       const allSongs = data.songs || [];
       setCachedSongs(allSongs);
 
@@ -1695,6 +1843,7 @@ export default function Home() {
     const previousKey = currentSong ? songKey(currentSong) : null;
     if (previousKey !== key) {
       trackSwitchAtRef.current = Date.now();
+      lastStartupRecoveryRef.current = { at: 0, key, attempts: 0 };
     }
     setIsLoadingSong(true);
     setLoadingSongKey(key);
@@ -1713,7 +1862,7 @@ export default function Home() {
       isLoadingSongRef.current = false;
       setIsLoadingSong(false);
       setLoadingSongKey(null);
-    }, 22000);
+    }, nativeAndroid ? 14000 : 22000);
 
     if (songList) {
       const idx = songList.findIndex(s => songKey(s) === key);
@@ -1733,6 +1882,8 @@ export default function Home() {
         }
 
         try {
+          const nativeStreamTimeoutMs = 10000;
+          const nativeLookupTimeoutMs = 7000;
           let streamUrl = null;
           let videoId = normalizeVideoId(song.videoId);
 
@@ -1752,7 +1903,42 @@ export default function Home() {
             streamUrl = song.url;
           }
 
-          // Path 1: resolve page URLs/non-direct links only when needed
+          // Path 1: YT song — resolve videoId first if needed, then get stream
+          if (!streamUrl) {
+            // Resolve videoId if we don't have one yet
+            if (!videoId) {
+              const query = `${song.title || ''} ${song.artist || ''} official audio`.trim();
+              try {
+                const data = await fetchJsonWithTimeout(apiPath(`/api/youtube-search?q=${encodeURIComponent(query)}`), nativeLookupTimeoutMs);
+                if (isStale()) return;
+                if (data.videoId) videoId = normalizeVideoId(data.videoId) || videoId;
+              } catch {}
+            }
+
+            // Now resolve stream URL from videoId via dedicated route
+            if (videoId) {
+              try {
+                const data = await fetchJsonWithTimeout(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(videoId)}`), nativeStreamTimeoutMs);
+                if (isStale()) return;
+                if (data.streamUrl) streamUrl = data.streamUrl;
+              } catch {}
+            }
+
+            // Fallback search+stream path
+            if (!streamUrl && videoId) {
+              try {
+                const data = await fetchJsonWithTimeout(
+                  apiPath(`/api/youtube-search?q=${encodeURIComponent((song.title || '') + ' ' + (song.artist || ''))}&stream=true`),
+                  nativeLookupTimeoutMs
+                );
+                if (isStale()) return;
+                if (data.videoId) videoId = normalizeVideoId(data.videoId) || videoId;
+                if (data.streamUrl) streamUrl = data.streamUrl;
+              } catch {}
+            }
+          }
+
+          // Path 2: resolve page URLs/non-direct links only when YT stream path did not return quickly
           if (!streamUrl && song.url && /^https?:\/\//i.test(song.url)) {
             const streamParams = new URLSearchParams();
             streamParams.set('url', song.url);
@@ -1762,7 +1948,7 @@ export default function Home() {
             streamParams.set('source', song.source || 'songs');
             const data = await fetchJsonWithTimeout(
               apiPath(`/api/stream?${streamParams.toString()}`),
-              12000
+              nativeStreamTimeoutMs
             );
             if (isStale()) return;
             if (data.streamUrl) streamUrl = data.streamUrl;
@@ -1776,41 +1962,6 @@ export default function Home() {
             }
           }
 
-          // Path 2: YT song — resolve videoId first if needed, then get stream
-          if (!streamUrl) {
-            // Resolve videoId if we don't have one yet
-            if (!videoId) {
-              const query = `${song.title || ''} ${song.artist || ''} official audio`.trim();
-              try {
-                const data = await fetchJsonWithTimeout(apiPath(`/api/youtube-search?q=${encodeURIComponent(query)}`), 12000);
-                if (isStale()) return;
-                if (data.videoId) videoId = normalizeVideoId(data.videoId) || videoId;
-              } catch {}
-            }
-
-            // Now resolve stream URL from videoId via dedicated route
-            if (videoId) {
-              try {
-                const data = await fetchJsonWithTimeout(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(videoId)}`), 15000);
-                if (isStale()) return;
-                if (data.streamUrl) streamUrl = data.streamUrl;
-              } catch {}
-            }
-
-            // Last resort: old stream=true path
-            if (!streamUrl && videoId) {
-              try {
-                const data = await fetchJsonWithTimeout(
-                  apiPath(`/api/youtube-search?q=${encodeURIComponent((song.title || '') + ' ' + (song.artist || ''))}&stream=true`),
-                  12000
-                );
-                if (isStale()) return;
-                if (data.videoId) videoId = normalizeVideoId(data.videoId) || videoId;
-                if (data.streamUrl) streamUrl = data.streamUrl;
-              } catch {}
-            }
-          }
-
           if (streamUrl) {
             if (isStale()) return;
             streamUrlCacheRef.current.set(key, streamUrl);
@@ -1819,19 +1970,47 @@ export default function Home() {
             const artwork = song.thumbnail || song.image || 'https://picsum.photos/seed/sonixart/200';
             const songWithUrl = { ...song, url: streamUrl, videoId: videoId || song.videoId };
             const queueSource = songList || queueRef.current || [];
-            const androidQueue = [{
-              url: streamUrl,
-              title: song.title || 'Unknown Track',
-              artist: song.artist || 'Unknown Artist',
-              album: song.album || 'Sonix Music',
-              artwork,
-            }];
+            const selectedKey = songKey(songWithUrl);
+            const nativePlayable = [];
+            const nativeSeen = new Set();
+
+            const pushPlayable = (candidate) => {
+              if (!candidate) return;
+              const cKey = songKey(candidate);
+              if (nativeSeen.has(cKey)) return;
+
+              let cUrl = candidate.url || '';
+              if (!isLikelyDirectAudioUrl(cUrl)) {
+                const cached = streamUrlCacheRef.current.get(cKey) || localStorage.getItem(`sonix_stream_${cKey}`);
+                if (cached && /^https?:\/\//i.test(cached)) cUrl = cached;
+              }
+              if (!cUrl || !/^https?:\/\//i.test(cUrl)) return;
+
+              nativePlayable.push({
+                url: cUrl,
+                title: candidate.title || 'Unknown Track',
+                artist: candidate.artist || 'Unknown Artist',
+                album: candidate.album || 'Sonix Music',
+                artwork: candidate.thumbnail || candidate.image || 'https://picsum.photos/seed/sonixart/200',
+                __key: cKey,
+              });
+              nativeSeen.add(cKey);
+            };
+
+            // Ensure selected track is first added with the freshly resolved stream.
+            pushPlayable(songWithUrl);
+            for (const item of queueSource) {
+              pushPlayable(item);
+            }
+
+            const resolvedIndex = Math.max(0, nativePlayable.findIndex(item => item.__key === selectedKey));
+            const androidQueue = nativePlayable.map(({ __key, ...rest }) => rest);
 
             yt.pause();
             await enforceEngineLock('native-audio');
             await NativeMusicPlayer.playQueue({
               queue: androidQueue,
-              index: 0,
+              index: resolvedIndex,
               shuffle: shuffleEnabled,
               repeatMode,
             });
@@ -2257,40 +2436,16 @@ export default function Home() {
     }
 
     const resolverTask = (async () => {
+      const androidFastStreamTimeout = 10000;
+      const androidFastLookupTimeout = 7000;
       let resolved = null;
       let fallbackVideoId = normalizeVideoId(videoId);
-
-      if (song.url && /^https?:\/\//i.test(song.url)) {
-        try {
-          const params = new URLSearchParams();
-          params.set('url', song.url);
-          params.set('title', song.title || '');
-          params.set('artist', song.artist || '');
-          params.set('type', 'song');
-          params.set('source', song.source || 'songs');
-          const data = await fetchJsonWithTimeout(
-            apiPath(`/api/stream?${params.toString()}`),
-            nativeAndroid ? 14000 : 10000
-          );
-          if (data?.streamUrl) {
-            resolved = data.streamUrl;
-          }
-          if (data?.videoId) {
-            const canonicalVideoId = normalizeVideoId(data.videoId);
-            if (canonicalVideoId) {
-              fallbackVideoId = canonicalVideoId;
-              videoIdCacheRef.current.set(key, canonicalVideoId);
-              try { localStorage.setItem(`yt_vid_${key}`, canonicalVideoId); } catch {}
-            }
-          }
-        } catch {}
-      }
 
       if (!resolved && fallbackVideoId) {
         try {
           const data = await fetchJsonWithTimeout(
             apiPath(`/api/yt-stream?videoId=${encodeURIComponent(fallbackVideoId)}`),
-            nativeAndroid ? 15000 : 10000
+            nativeAndroid ? androidFastStreamTimeout : 10000
           );
           if (data?.streamUrl) {
             resolved = data.streamUrl;
@@ -2304,7 +2459,7 @@ export default function Home() {
           if (q) {
             const data = await fetchJsonWithTimeout(
               apiPath(`/api/youtube-search?q=${encodeURIComponent(q)}&stream=true`),
-              nativeAndroid ? 12000 : 9000
+              nativeAndroid ? androidFastLookupTimeout : 9000
             );
             if (data?.videoId) {
               const discoveredVideoId = normalizeVideoId(data.videoId);
@@ -2325,10 +2480,36 @@ export default function Home() {
         try {
           const data = await fetchJsonWithTimeout(
             apiPath(`/api/yt-stream?videoId=${encodeURIComponent(fallbackVideoId)}`),
-            nativeAndroid ? 15000 : 10000
+            nativeAndroid ? androidFastStreamTimeout : 10000
           );
           if (data?.streamUrl) {
             resolved = data.streamUrl;
+          }
+        } catch {}
+      }
+
+      if (!resolved && song.url && /^https?:\/\//i.test(song.url)) {
+        try {
+          const params = new URLSearchParams();
+          params.set('url', song.url);
+          params.set('title', song.title || '');
+          params.set('artist', song.artist || '');
+          params.set('type', 'song');
+          params.set('source', song.source || 'songs');
+          const data = await fetchJsonWithTimeout(
+            apiPath(`/api/stream?${params.toString()}`),
+            nativeAndroid ? androidFastStreamTimeout : 10000
+          );
+          if (data?.streamUrl) {
+            resolved = data.streamUrl;
+          }
+          if (data?.videoId) {
+            const canonicalVideoId = normalizeVideoId(data.videoId);
+            if (canonicalVideoId) {
+              fallbackVideoId = canonicalVideoId;
+              videoIdCacheRef.current.set(key, canonicalVideoId);
+              try { localStorage.setItem(`yt_vid_${key}`, canonicalVideoId); } catch {}
+            }
           }
         } catch {}
       }

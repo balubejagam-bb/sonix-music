@@ -252,9 +252,7 @@ public class MusicPlaybackService extends MediaSessionService {
                             player.seekToPreviousMediaItem();
                             player.play();
                         } else if (shouldUseNativeTransport()) {
-                            ytMode = false;
-                            player.seekToDefaultPosition(0);
-                            player.play();
+                            MusicPlayerPlugin.triggerWebAction("previous");
                         } else {
                             MusicPlayerPlugin.triggerWebAction("previous");
                         }
@@ -387,8 +385,7 @@ public class MusicPlaybackService extends MediaSessionService {
                             player.seekToPreviousMediaItem();
                             player.play();
                         } else {
-                            player.seekToDefaultPosition(0);
-                            player.play();
+                            MusicPlayerPlugin.triggerWebAction("previous");
                         }
                     } else {
                         MusicPlayerPlugin.triggerWebAction("previous");

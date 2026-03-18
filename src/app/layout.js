@@ -39,6 +39,22 @@ export default function RootLayout({ children }) {
   return (
     <html lang="en">
       <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){
+  if (typeof window === 'undefined') return;
+  window.Capacitor = window.Capacitor || {};
+  if (typeof window.Capacitor.triggerEvent !== 'function') {
+    window.Capacitor.triggerEvent = function(){};
+  }
+  window.Capacitor.Plugins = window.Capacitor.Plugins || {};
+  window.Capacitor.Plugins.App = window.Capacitor.Plugins.App || {};
+  if (typeof window.Capacitor.Plugins.App.triggerEvent !== 'function') {
+    window.Capacitor.Plugins.App.triggerEvent = function(){};
+  }
+})();`,
+          }}
+        />
         <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎵</text></svg>" />
       </head>
       <body>
