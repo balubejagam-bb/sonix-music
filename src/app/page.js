@@ -376,7 +376,8 @@ function useYouTubePlayer() {
         if (fallbackVideoId && isValidYouTubeVideoId(fallbackVideoId)) {
           try {
             playVideoById(fallbackVideoId);
-            return false;
+            setIsPlaying(true);
+            return true;
           } catch {}
         }
         return false;
@@ -385,6 +386,8 @@ function useYouTubePlayer() {
     if (fallbackVideoId && isValidYouTubeVideoId(fallbackVideoId)) {
       try {
         playVideoById(fallbackVideoId);
+        setIsPlaying(true);
+        return Promise.resolve(true);
       } catch {}
     }
     return Promise.resolve(false);
@@ -1965,13 +1968,19 @@ export default function Home() {
             await enforceEngineLock('web-audio');
             const started = await yt.playStream(streamUrl, vId);
             if (started) {
-              activeEngineRef.current = 'web-audio';
+              activeEngineRef.current = yt.loadedVideoIdRef.current === vId ? 'web-video' : 'web-audio';
             } else {
-              setOptimisticPlaying(false);
-              isLoadingSongRef.current = false;
-              setIsLoadingSong(false);
-              setLoadingSongKey(null);
-              return;
+              if (!isPodcastItem(playableSong) && vId) {
+                await enforceEngineLock('web-video');
+                yt.playVideoById(vId);
+                activeEngineRef.current = 'web-video';
+              } else {
+                setOptimisticPlaying(false);
+                isLoadingSongRef.current = false;
+                setIsLoadingSong(false);
+                setLoadingSongKey(null);
+                return;
+              }
             }
           } else if (isPodcastItem(playableSong)) {
             console.warn('Podcast stream unavailable from dataset URL; skipping video fallback.');
@@ -1981,11 +1990,9 @@ export default function Home() {
             setLoadingSongKey(null);
             return;
           } else {
-            setOptimisticPlaying(false);
-            isLoadingSongRef.current = false;
-            setIsLoadingSong(false);
-            setLoadingSongKey(null);
-            return;
+            await enforceEngineLock('web-video');
+            yt.playVideoById(vId);
+            activeEngineRef.current = 'web-video';
           }
         }
       } else {
@@ -2016,21 +2023,17 @@ export default function Home() {
             await enforceEngineLock('web-audio');
             const started = await yt.playStream(streamUrl, fallbackVideoId);
             if (started) {
-              activeEngineRef.current = 'web-audio';
+              activeEngineRef.current = yt.loadedVideoIdRef.current === fallbackVideoId ? 'web-video' : 'web-audio';
             } else {
-              setOptimisticPlaying(false);
-              isLoadingSongRef.current = false;
-              setIsLoadingSong(false);
-              setLoadingSongKey(null);
-              return;
+              await enforceEngineLock('web-video');
+              yt.playVideoById(fallbackVideoId);
+              activeEngineRef.current = 'web-video';
             }
           }
           else {
-            setOptimisticPlaying(false);
-            isLoadingSongRef.current = false;
-            setIsLoadingSong(false);
-            setLoadingSongKey(null);
-            return;
+            await enforceEngineLock('web-video');
+            yt.playVideoById(fallbackVideoId);
+            activeEngineRef.current = 'web-video';
           }
         } else {
           setOptimisticPlaying(false);
@@ -2277,6 +2280,7 @@ export default function Home() {
 
     const resolverTask = (async () => {
       let resolved = null;
+      let fallbackVideoId = normalizeVideoId(videoId);
 
       if (song.url && /^https?:\/\//i.test(song.url) && !(podcastMode && isLikelyImageUrl(song.url))) {
         try {
@@ -2293,6 +2297,14 @@ export default function Home() {
           );
           if (data?.streamUrl) {
             resolved = data.streamUrl;
+          }
+          if (data?.videoId) {
+            const canonicalVideoId = normalizeVideoId(data.videoId);
+            if (canonicalVideoId) {
+              fallbackVideoId = canonicalVideoId;
+              videoIdCacheRef.current.set(key, canonicalVideoId);
+              try { localStorage.setItem(`yt_vid_${key}`, canonicalVideoId); } catch {}
+            }
           }
         } catch {}
       }
@@ -2329,10 +2341,10 @@ export default function Home() {
         }
       }
 
-      if (!resolved && !podcastMode && videoId) {
+      if (!resolved && !podcastMode && fallbackVideoId) {
         try {
           const data = await fetchJsonWithTimeout(
-            apiPath(`/api/yt-stream?videoId=${encodeURIComponent(videoId)}`),
+            apiPath(`/api/yt-stream?videoId=${encodeURIComponent(fallbackVideoId)}`),
             nativeAndroid ? 15000 : 10000
           );
           if (data?.streamUrl) {
@@ -2349,9 +2361,29 @@ export default function Home() {
               apiPath(`/api/youtube-search?q=${encodeURIComponent(q)}&stream=true`),
               nativeAndroid ? 12000 : 9000
             );
+            if (data?.videoId) {
+              const discoveredVideoId = normalizeVideoId(data.videoId);
+              if (discoveredVideoId) {
+                fallbackVideoId = discoveredVideoId;
+                videoIdCacheRef.current.set(key, discoveredVideoId);
+                try { localStorage.setItem(`yt_vid_${key}`, discoveredVideoId); } catch {}
+              }
+            }
             if (data?.streamUrl) {
               resolved = data.streamUrl;
             }
+          }
+        } catch {}
+      }
+
+      if (!resolved && !podcastMode && fallbackVideoId) {
+        try {
+          const data = await fetchJsonWithTimeout(
+            apiPath(`/api/yt-stream?videoId=${encodeURIComponent(fallbackVideoId)}`),
+            nativeAndroid ? 15000 : 10000
+          );
+          if (data?.streamUrl) {
+            resolved = data.streamUrl;
           }
         } catch {}
       }
