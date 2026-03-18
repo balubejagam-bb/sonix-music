@@ -2110,6 +2110,20 @@ export default function Home() {
   }, [currentSong, yt.isPlaying, nativeAndroid, videoEnabled, nativeIsPlaying, optimisticPlaying]);
 
   useEffect(() => {
+    if (!nativeAndroid || !currentSong || !canUseNativePlugins()) return;
+
+    const uiPlayingState = videoEnabled
+      ? yt.isPlaying
+      : (nativeIsPlaying || optimisticPlaying || yt.isPlaying);
+
+    NativeMusicPlayer.updateMeta({
+      title: currentSong.title || 'Sonix Music',
+      artist: currentSong.artist || 'Playing...',
+      isPlaying: !!uiPlayingState,
+    }).catch(() => {});
+  }, [nativeAndroid, currentSong, videoEnabled, yt.isPlaying, nativeIsPlaying, optimisticPlaying]);
+
+  useEffect(() => {
     return () => {
       if (!canUseNativePlugins()) return;
       const controls = getMusicControls();
@@ -2256,7 +2270,7 @@ export default function Home() {
     const resolverTask = (async () => {
       let resolved = null;
 
-      if (song.url && /^https?:\/\//i.test(song.url)) {
+      if (song.url && /^https?:\/\//i.test(song.url) && !(podcastMode && isLikelyImageUrl(song.url))) {
         try {
           const params = new URLSearchParams();
           params.set('url', song.url);

@@ -29,6 +29,13 @@ export async function GET(request) {
       if (podcastStream) {
         return NextResponse.json({ streamUrl: podcastStream, source: 'podcast' });
       }
+
+      // Fallback: resolve from title/artist so playback still works for stale/broken feed URLs.
+      const fallback = await resolvePodcastFallbackStream(request, title, artist);
+      if (fallback) {
+        return NextResponse.json({ streamUrl: fallback, source: 'podcast-fallback' });
+      }
+
       return NextResponse.json({ error: 'Could not resolve podcast stream from dataset URL' }, { status: 404 });
     }
 
@@ -49,6 +56,28 @@ export async function GET(request) {
   } catch (e) {
     console.error('Stream resolve error:', e);
     return NextResponse.json({ error: 'Stream resolve failed' }, { status: 500 });
+  }
+}
+
+async function resolvePodcastFallbackStream(request, title = '', artist = '') {
+  try {
+    const q = `${title || ''} ${artist || ''} podcast episode`.trim();
+    if (!q) return null;
+
+    const url = new URL(request.url);
+    const origin = `${url.protocol}//${url.host}`;
+    const res = await fetch(
+      `${origin}/api/youtube-search?q=${encodeURIComponent(q)}&stream=true`,
+      { signal: AbortSignal.timeout(8000), headers: { 'Accept': 'application/json' } }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (typeof data?.streamUrl === 'string' && /^https?:\/\//i.test(data.streamUrl)) {
+      return data.streamUrl;
+    }
+    return null;
+  } catch {
+    return null;
   }
 }
 
