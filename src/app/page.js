@@ -2387,15 +2387,64 @@ export default function Home() {
     if (!currentSong) return;
 
     const resumeAt = yt.currentTime || 0;
-    yt.pause();
 
     if (nativeAndroid) {
+      const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
+      const nativeSourceSong = {
+        ...currentSong,
+        // Avoid direct source URL fallback here (can be short preview clips).
+        // Prefer full-length stream resolved from the active video id.
+        url: '',
+        source: 'youtube',
+        ...(videoId ? { videoId } : {}),
+      };
+
+      // Fast-path: while video continues, resolve a native stream and switch with minimal gap.
+      if (videoId) {
+        try {
+          const streamUrl = await resolveAudioStreamForSong(nativeSourceSong, videoId, { prefetch: true });
+          if (streamUrl) {
+            const artwork = currentSong.image || currentSong.thumbnail || '';
+            await enforceEngineLock('native-audio');
+            await NativeMusicPlayer.playQueue({
+              queue: [{
+                url: streamUrl,
+                title: currentSong.title || 'Unknown Track',
+                artist: currentSong.artist || 'Unknown Artist',
+                album: currentSong.album || 'Sonix Music',
+                artwork,
+              }],
+              index: 0,
+              shuffle: shuffleEnabled,
+              repeatMode,
+            });
+
+            // Pause video only after native queue is accepted to avoid audible dead-air.
+            yt.pause();
+
+            setCurrentSong(prev => prev ? { ...prev, url: streamUrl, videoId } : prev);
+            nativeTrackLoadedRef.current = true;
+            nativeShouldPlayRef.current = true;
+            setNativeIsPlaying(true);
+            setOptimisticPlaying(true);
+            activeEngineRef.current = 'native-audio';
+
+            if (resumeAt > 0) {
+              setTimeout(() => {
+                NativeMusicPlayer.seekTo({ positionMs: resumeAt * 1000 }).catch(() => {});
+              }, 350);
+            }
+            return;
+          }
+        } catch {}
+      }
+
       activeEngineRef.current = 'none';
       nativeTrackLoadedRef.current = false;
       nativeShouldPlayRef.current = false;
       setNativeIsPlaying(false);
       isLoadingSongRef.current = false;
-      await playSongDirect(currentSong, queueRef.current?.length ? queueRef.current : null, true);
+      await playSongDirect(nativeSourceSong, queueRef.current?.length ? queueRef.current : null, true);
       if (resumeAt > 0) {
         setTimeout(() => {
           NativeMusicPlayer.seekTo({ positionMs: resumeAt * 1000 }).catch(() => {});
@@ -2403,6 +2452,8 @@ export default function Home() {
       }
       return;
     }
+
+    yt.pause();
 
     const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
     if (!videoId) return;
