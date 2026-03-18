@@ -13,14 +13,57 @@ if (!globalThis.__SONIX_NATIVE_MUSIC_PLAYER__) {
   globalThis.__SONIX_NATIVE_MUSIC_PLAYER__ = NativeMusicPlayer;
 }
 
+if (typeof window !== 'undefined') {
+  // Some injected bridge/plugin scripts call triggerEvent eagerly.
+  // Ensure a safe no-op exists so startup doesn't break rendering.
+  window.Capacitor = window.Capacitor || {};
+  if (typeof window.Capacitor.triggerEvent !== 'function') {
+    window.Capacitor.triggerEvent = () => {};
+  }
+  window.Capacitor.Plugins = window.Capacitor.Plugins || {};
+  if (!window.Capacitor.Plugins.App || typeof window.Capacitor.Plugins.App.triggerEvent !== 'function') {
+    window.Capacitor.Plugins.App = {
+      ...(window.Capacitor.Plugins.App || {}),
+      triggerEvent: () => {},
+    };
+  }
+}
+
 function isNativeAndroid() {
   return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
 }
 
+function resolveApiBase() {
+  if (isNativeAndroid()) return 'https://sonix-music.vercel.app';
+  if (typeof window !== 'undefined' && window.location?.origin) return window.location.origin;
+  return '';
+}
+
 function clientApiPath(path) {
   if (typeof path !== 'string') return path;
+
+  // Never allow localhost API URLs in deployed/browser clients.
+  const localApiMatch = path.match(/^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(\/api\/.*)$/i);
+  if (localApiMatch) {
+    path = localApiMatch[1];
+  }
+
+  // Normalize any absolute API URL to this runtime's API base.
+  if (/^https?:\/\//i.test(path)) {
+    try {
+      const u = new URL(path);
+      if (u.pathname.startsWith('/api/')) {
+        return `${resolveApiBase()}${u.pathname}${u.search}${u.hash}`;
+      }
+      return path;
+    } catch {
+      return path;
+    }
+  }
+
   if (!path.startsWith('/')) return path;
-  return isNativeAndroid() ? `https://sonix-music.vercel.app${path}` : path;
+  const base = resolveApiBase();
+  return base ? `${base}${path}` : path;
 }
 
 let backgroundModeLoaderPromise = null;
@@ -50,6 +93,9 @@ async function getBackgroundMode() {
 
 function getMusicControls() {
   if (typeof window === 'undefined') return null;
+  // On Android we now use the native MusicPlayer plugin/service path.
+  // Avoid Cordova MusicControls bootstrap errors that can break initial render.
+  if (isNativeAndroid()) return null;
   try {
     const mc = window.MusicControls || null;
     if (mc && typeof mc.subscribe === 'function') return mc;
@@ -376,6 +422,12 @@ function fmt(s) {
   const m = Math.floor(s / 60);
   const sec = Math.floor(s % 60);
   return `${m}:${sec.toString().padStart(2, '0')}`;
+}
+
+function normalizeVideoId(value) {
+  if (typeof value !== 'string') return null;
+  const v = value.trim();
+  return /^[A-Za-z0-9_-]{11}$/.test(v) ? v : null;
 }
 
 // Decode HTML entities like &quot; &amp; &#39;
@@ -1298,26 +1350,24 @@ export default function Home() {
     if (!song) return null;
     const key = songKey(song);
 
-    if (song.videoId && typeof song.videoId === 'string') {
-      const sanitized = song.videoId.trim();
-      if (/^[A-Za-z0-9_-]{11}$/.test(sanitized)) {
-        videoIdCacheRef.current.set(key, sanitized);
-        return sanitized;
-      }
+    const direct = normalizeVideoId(song.videoId);
+    if (direct) {
+      videoIdCacheRef.current.set(key, direct);
+      return direct;
     }
 
     const cachedVideoId = videoIdCacheRef.current.get(key);
-    if (cachedVideoId && typeof cachedVideoId === 'string' && /^[A-Za-z0-9_-]{11}$/.test(cachedVideoId.trim())) {
-      return cachedVideoId.trim();
+    if (normalizeVideoId(cachedVideoId)) {
+      return normalizeVideoId(cachedVideoId);
     }
 
     // Check localStorage cache for cross-session persistence
     try {
       const persisted = localStorage.getItem(`yt_vid_${key}`);
-      if (persisted && /^[A-Za-z0-9_-]{11}$/.test(persisted.trim())) {
-        const sanitized = persisted.trim();
-        videoIdCacheRef.current.set(key, sanitized);
-        return sanitized;
+      const persistedId = normalizeVideoId(persisted);
+      if (persistedId) {
+        videoIdCacheRef.current.set(key, persistedId);
+        return persistedId;
       }
     } catch {}
 
@@ -1330,8 +1380,8 @@ export default function Home() {
       : `${song.title || ''} ${song.artist || ''} official audio`.trim();
     const task = searchYouTubeFallback(query)
       .then(data => {
-        const candidate = typeof data?.videoId === 'string' ? data.videoId.trim() : '';
-        if (/^[A-Za-z0-9_-]{11}$/.test(candidate)) {
+        const candidate = normalizeVideoId(data?.videoId);
+        if (candidate) {
           videoIdCacheRef.current.set(key, candidate);
           try { localStorage.setItem(`yt_vid_${key}`, candidate); } catch {}
           return candidate;
@@ -1356,8 +1406,9 @@ export default function Home() {
       const nextSong = q[idx];
       if (!nextSong) continue;
       // On Android: also warm the stream cache
-      if (nativeAndroid && nextSong.videoId) {
-        fetch(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(nextSong.videoId)}`)).catch(() => {});
+      const nextVideoId = normalizeVideoId(nextSong.videoId);
+      if (nativeAndroid && nextVideoId) {
+        fetch(apiPath(`/api/yt-stream?videoId=${encodeURIComponent(nextVideoId)}`)).catch(() => {});
       }
       resolveSongVideoId(nextSong).catch(() => {});
     }
@@ -1619,7 +1670,7 @@ export default function Home() {
 
         try {
           let streamUrl = null;
-          let videoId = song.videoId || null;
+          let videoId = normalizeVideoId(song.videoId);
 
           if (forceWebFallback) {
             console.warn('[Android] Native playback skipped due to active backoff/cooldown policy.');
@@ -1829,7 +1880,7 @@ export default function Home() {
         ? { ...songForWeb, videoId: resolvedVideoId }
         : songForWeb;
 
-      const vId = playableSong.videoId || resolvedVideoId;
+      const vId = normalizeVideoId(playableSong.videoId) || resolvedVideoId;
       const preferIframePlayback = nativeAndroid;
       setCurrentSong(playableSong);
       setNativeIsPlaying(false);
@@ -2449,7 +2500,7 @@ export default function Home() {
     seekDragActiveRef.current = true;
     seekDragTargetRef.current = target;
     updateSeekFromClientX(getEventX(e), target);
-    e.preventDefault();
+    if (e?.cancelable) e.preventDefault();
   }
 
   useEffect(() => {
@@ -3090,7 +3141,7 @@ export default function Home() {
                   onPointerUp={(e) => { e.stopPropagation(); seekFromBarEvent(e); }}
                   onMouseDown={(e) => { e.stopPropagation(); startSeekDrag(e); }}
                   onTouchStart={(e) => { e.stopPropagation(); startSeekDrag(e); }}
-                  onTouchEnd={(e) => { e.stopPropagation(); e.preventDefault(); seekFromBarEvent(e); }}
+                  onTouchEnd={(e) => { e.stopPropagation(); if (e.cancelable) e.preventDefault(); seekFromBarEvent(e); }}
                 >
                   <div className="progress-filled" style={{ width: durationForUi ? `${(yt.currentTime / durationForUi) * 100}%` : '0%' }}></div>
                 </div>
@@ -3202,7 +3253,7 @@ export default function Home() {
                 onPointerUp={seekFromBarEvent}
                 onMouseDown={startSeekDrag}
                 onTouchStart={startSeekDrag}
-                onTouchEnd={(e) => { e.preventDefault(); seekFromBarEvent(e); }}
+                onTouchEnd={(e) => { if (e.cancelable) e.preventDefault(); seekFromBarEvent(e); }}
               >
                 <div className="sp-progress-fill" style={{ width: durationForUi ? `${(yt.currentTime / durationForUi) * 100}%` : '0%' }} />
                 <div className="sp-progress-thumb" style={{ left: durationForUi ? `${(yt.currentTime / durationForUi) * 100}%` : '0%' }} />

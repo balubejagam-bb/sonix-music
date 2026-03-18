@@ -4,10 +4,36 @@ import { Capacitor } from '@capacitor/core';
 
 const AuthContext = createContext(null);
 
-function apiPath(path) {
-  if (typeof path !== 'string' || !path.startsWith('/')) return path;
+function resolveApiBase() {
   const nativeAndroid = Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
-  return nativeAndroid ? `https://sonix-music.vercel.app${path}` : path;
+  if (nativeAndroid) return 'https://sonix-music.vercel.app';
+  if (typeof window !== 'undefined' && window.location?.origin) return window.location.origin;
+  return '';
+}
+
+function apiPath(path) {
+  if (typeof path !== 'string') return path;
+
+  const localApiMatch = path.match(/^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(\/api\/.*)$/i);
+  if (localApiMatch) {
+    path = localApiMatch[1];
+  }
+
+  if (/^https?:\/\//i.test(path)) {
+    try {
+      const u = new URL(path);
+      if (u.pathname.startsWith('/api/')) {
+        return `${resolveApiBase()}${u.pathname}${u.search}${u.hash}`;
+      }
+      return path;
+    } catch {
+      return path;
+    }
+  }
+
+  if (!path.startsWith('/')) return path;
+  const base = resolveApiBase();
+  return base ? `${base}${path}` : path;
 }
 
 export function AuthProvider({ children }) {
