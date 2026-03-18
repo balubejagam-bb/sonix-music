@@ -17,13 +17,14 @@ public class MainActivity extends BridgeActivity {
 
 	@Override
 	public void onCreate(Bundle savedInstanceState) {
-		super.onCreate(savedInstanceState);
-
 		try {
 			registerPlugin(MusicPlayerPlugin.class);
+			android.util.Log.i("SonixMusic", "MusicPlayer plugin registered");
 		} catch (Throwable t) {
 			android.util.Log.w("SonixMusic", "MusicPlayer plugin registration skipped", t);
 		}
+
+		super.onCreate(savedInstanceState);
 
 		// Allow media autoplay without user gesture (fixes 0:00 stuck bug)
 		try {
