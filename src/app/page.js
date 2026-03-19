@@ -596,6 +596,7 @@ export default function Home() {
   const lastStartupRecoveryRef = useRef({ at: 0, key: '', attempts: 0 });
   const nativeTrackLoadedRef = useRef(false);
   const activeEngineRef = useRef('none'); // none | native-audio | web-audio | web-video
+  const lastQueueAdvanceRef = useRef({ at: 0, action: '' });
   const nativeFailureRef = useRef({
     failures: 0,
     lastFailureAt: 0,
@@ -2353,15 +2354,52 @@ export default function Home() {
   }, []);
 
   // ───── Next / Prev using refs (never stale) ─────
-  function handleNext() {
+  function computeNextQueueIndex(direction = 'next', reason = 'manual') {
+    const q = queueRef.current;
+    if (!q || q.length === 0) return -1;
+
+    const currentIdx = Math.max(0, Math.min(queueIndexRef.current, q.length - 1));
+
+    if (reason === 'ended' && repeatMode === 'one') {
+      return currentIdx;
+    }
+
+    if (shuffleEnabled) {
+      if (q.length === 1) return currentIdx;
+      let idx = Math.floor(Math.random() * q.length);
+      if (idx === currentIdx) {
+        idx = (idx + 1) % q.length;
+      }
+      return idx;
+    }
+
+    if (direction === 'previous') {
+      return currentIdx <= 0 ? q.length - 1 : currentIdx - 1;
+    }
+
+    if (reason === 'ended' && repeatMode === 'off' && currentIdx >= q.length - 1) {
+      return -1;
+    }
+
+    return (currentIdx + 1) % q.length;
+  }
+
+  function handleNext(reason = 'manual') {
     const q = queueRef.current;
     if (!q || q.length === 0) return;
-    let nextIdx;
-    if (shuffleEnabled) {
-      nextIdx = Math.floor(Math.random() * q.length);
-    } else {
-      nextIdx = (queueIndexRef.current + 1) % q.length;
+
+    const now = Date.now();
+    if (now - lastQueueAdvanceRef.current.at < 650 && lastQueueAdvanceRef.current.action === `next:${reason}`) {
+      return;
     }
+
+    const nextIdx = computeNextQueueIndex('next', reason);
+    if (nextIdx < 0) {
+      setOptimisticPlaying(false);
+      return;
+    }
+
+    lastQueueAdvanceRef.current = { at: now, action: `next:${reason}` };
     queueIndexRef.current = nextIdx;
     isLoadingSongRef.current = false; // force-reset guard
     playSongDirect(q[nextIdx], null, true);
@@ -2370,7 +2408,16 @@ export default function Home() {
   function handlePrev() {
     const q = queueRef.current;
     if (!q || q.length === 0) return;
-    const prevIdx = queueIndexRef.current <= 0 ? q.length - 1 : queueIndexRef.current - 1;
+
+    const now = Date.now();
+    if (now - lastQueueAdvanceRef.current.at < 650 && lastQueueAdvanceRef.current.action === 'previous:manual') {
+      return;
+    }
+
+    const prevIdx = computeNextQueueIndex('previous', 'manual');
+    if (prevIdx < 0) return;
+
+    lastQueueAdvanceRef.current = { at: now, action: 'previous:manual' };
     queueIndexRef.current = prevIdx;
     isLoadingSongRef.current = false; // force-reset guard
     playSongDirect(q[prevIdx], null, true);
@@ -2378,7 +2425,7 @@ export default function Home() {
 
   // Auto-play next on song end
   useEffect(() => {
-    yt.onEndRef.current = handleNext;
+    yt.onEndRef.current = () => handleNext('ended');
   });
 
   // ───── Open playlist ─────
