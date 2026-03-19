@@ -580,6 +580,7 @@ export default function Home() {
   const videoIdCacheRef = useRef(new Map());
   const streamUrlCacheRef = useRef(new Map());
   const pendingStreamResolveRef = useRef(new Map());
+  const STREAM_CACHE_TTL_MS = 15 * 60 * 1000;
   const nativeShouldPlayRef = useRef(false);
   const optimisticPlayingRef = useRef(false);
   const nativeLastResumeAtRef = useRef(0);
@@ -793,9 +794,7 @@ export default function Home() {
       }
 
       if (!isLikelyDirectAudioUrl(url)) {
-        const cached =
-          streamUrlCacheRef.current.get(key) ||
-          (typeof window !== 'undefined' ? localStorage.getItem(`sonix_stream_${key}`) : null);
+        const cached = getCachedStreamUrl(key);
         if (cached && /^https?:\/\//i.test(cached)) {
           url = cached;
         }
@@ -1608,6 +1607,49 @@ export default function Home() {
     return song.songId || song._id || song.videoId || `${song.title || ''}::${song.artist || ''}`;
   }
 
+  function getCachedStreamUrl(key) {
+    if (!key) return null;
+
+    const memoryValue = streamUrlCacheRef.current.get(key);
+    if (typeof memoryValue === 'string' && /^https?:\/\//i.test(memoryValue)) {
+      return memoryValue;
+    }
+
+    try {
+      const raw = localStorage.getItem(`sonix_stream_${key}`);
+      if (!raw) return null;
+
+      // Legacy plain-string cache entries are treated as stale.
+      if (!raw.trim().startsWith('{')) {
+        localStorage.removeItem(`sonix_stream_${key}`);
+        return null;
+      }
+
+      const parsed = JSON.parse(raw);
+      const url = parsed?.url;
+      const savedAt = Number(parsed?.savedAt || 0);
+      const fresh = /^https?:\/\//i.test(url || '') && savedAt > 0 && (Date.now() - savedAt) < STREAM_CACHE_TTL_MS;
+
+      if (!fresh) {
+        localStorage.removeItem(`sonix_stream_${key}`);
+        return null;
+      }
+
+      streamUrlCacheRef.current.set(key, url);
+      return url;
+    } catch {
+      return null;
+    }
+  }
+
+  function setCachedStreamUrl(key, url) {
+    if (!key || !/^https?:\/\//i.test(url || '')) return;
+    streamUrlCacheRef.current.set(key, url);
+    try {
+      localStorage.setItem(`sonix_stream_${key}`, JSON.stringify({ url, savedAt: Date.now() }));
+    } catch {}
+  }
+
   function isLikelyImageUrl(url = '') {
     if (typeof url !== 'string') return false;
     return /\.(jpg|jpeg|png|gif|webp|svg)(\?|$)/i.test(url);
@@ -1681,7 +1723,7 @@ export default function Home() {
       // Keep this shallow to avoid aggressive network churn on mobile.
       if (step <= 2) {
         const key = songKey(nextSong);
-        const cached = streamUrlCacheRef.current.get(key) || localStorage.getItem(`sonix_stream_${key}`);
+        const cached = getCachedStreamUrl(key);
         if (!cached) {
           resolveAudioStreamForSong(nextSong, nextVideoId || null, { prefetch: true }).catch(() => {});
         }
@@ -1939,7 +1981,7 @@ export default function Home() {
           }
 
           // Fast path 0: reuse resolved stream from in-memory/local cache
-          const cachedStream = streamUrlCacheRef.current.get(key) || localStorage.getItem(`sonix_stream_${key}`);
+          const cachedStream = getCachedStreamUrl(key);
           if (cachedStream && /^https?:\/\//i.test(cachedStream)) {
             streamUrl = cachedStream;
           }
@@ -2010,8 +2052,7 @@ export default function Home() {
 
           if (streamUrl) {
             if (isStale()) return;
-            streamUrlCacheRef.current.set(key, streamUrl);
-            try { localStorage.setItem(`sonix_stream_${key}`, streamUrl); } catch {}
+            setCachedStreamUrl(key, streamUrl);
 
             const artwork = song.thumbnail || song.image || 'https://picsum.photos/seed/sonixart/200';
             const songWithUrl = { ...song, url: streamUrl, videoId: videoId || song.videoId };
@@ -2027,7 +2068,7 @@ export default function Home() {
 
               let cUrl = candidate.url || '';
               if (!isLikelyDirectAudioUrl(cUrl)) {
-                const cached = streamUrlCacheRef.current.get(cKey) || localStorage.getItem(`sonix_stream_${cKey}`);
+                const cached = getCachedStreamUrl(cKey);
                 if (cached && /^https?:\/\//i.test(cached)) cUrl = cached;
               }
               if (!cUrl || !/^https?:\/\//i.test(cUrl)) return;
@@ -2377,10 +2418,6 @@ export default function Home() {
       return currentIdx <= 0 ? q.length - 1 : currentIdx - 1;
     }
 
-    if (reason === 'ended' && repeatMode === 'off' && currentIdx >= q.length - 1) {
-      return -1;
-    }
-
     return (currentIdx + 1) % q.length;
   }
 
@@ -2519,7 +2556,7 @@ export default function Home() {
     const key = songKey(song);
     const preferFast = options?.prefetch === true;
 
-    const cachedStream = streamUrlCacheRef.current.get(key) || localStorage.getItem(`sonix_stream_${key}`);
+    const cachedStream = getCachedStreamUrl(key);
     if (cachedStream && /^https?:\/\//i.test(cachedStream)) {
       return cachedStream;
     }
@@ -2608,8 +2645,7 @@ export default function Home() {
       }
 
       if (resolved && /^https?:\/\//i.test(resolved)) {
-        streamUrlCacheRef.current.set(key, resolved);
-        try { localStorage.setItem(`sonix_stream_${key}`, resolved); } catch {}
+        setCachedStreamUrl(key, resolved);
       }
 
       return resolved;
