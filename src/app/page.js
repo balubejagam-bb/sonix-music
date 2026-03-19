@@ -803,6 +803,50 @@ export default function Home() {
     return { queue, index };
   }
 
+  function buildNativePlayableQueue(sourceQueue = [], selectedSong = null) {
+    const queue = [];
+    const seen = new Set();
+
+    const pushPlayable = (candidate) => {
+      if (!candidate) return;
+      const cKey = songKey(candidate);
+      if (seen.has(cKey)) return;
+
+      let url = candidate.url || '';
+      if (!isLikelyDirectAudioUrl(url)) {
+        const cached = streamUrlCacheRef.current.get(cKey) || localStorage.getItem(`sonix_stream_${cKey}`);
+        if (cached && /^https?:\/\//i.test(cached)) {
+          url = cached;
+        }
+      }
+
+      if (!url || !/^https?:\/\//i.test(url)) return;
+
+      queue.push({
+        url,
+        title: candidate.title || 'Unknown Track',
+        artist: candidate.artist || 'Unknown Artist',
+        album: candidate.album || 'Sonix Music',
+        artwork: candidate.image || candidate.thumbnail || '',
+        __key: cKey,
+      });
+      seen.add(cKey);
+    };
+
+    // Ensure selected song is first-class in queue.
+    pushPlayable(selectedSong);
+    for (const item of sourceQueue || []) {
+      pushPlayable(item);
+    }
+
+    const selectedKey = selectedSong ? songKey(selectedSong) : '';
+    const index = Math.max(0, queue.findIndex((s) => s.__key === selectedKey));
+    return {
+      queue: queue.map(({ __key, ...rest }) => rest),
+      index,
+    };
+  }
+
   // ───── Load initial data & cache (Once) ─────
   useEffect(() => {
     const initApp = async () => {
@@ -914,15 +958,13 @@ export default function Home() {
       const streamUrl = await resolveAudioStreamForSong(currentSong, videoId, { prefetch: true });
       if (!streamUrl) return false;
 
+      const selectedSongWithStream = { ...currentSong, url: streamUrl, videoId };
+      const queueSource = queueRef.current?.length ? queueRef.current : [selectedSongWithStream];
+      const nativeQueue = buildNativePlayableQueue(queueSource, selectedSongWithStream);
+
       await NativeMusicPlayer.playQueue({
-        queue: [{
-          url: streamUrl,
-          title: currentSong.title || 'Unknown Track',
-          artist: currentSong.artist || 'Unknown Artist',
-          album: currentSong.album || 'Sonix Music',
-          artwork: currentSong.image || currentSong.thumbnail || '',
-        }],
-        index: 0,
+        queue: nativeQueue.queue,
+        index: nativeQueue.index,
         shuffle: shuffleEnabled,
         repeatMode,
       });
@@ -932,7 +974,9 @@ export default function Home() {
       }
 
       yt.pause();
-      setCurrentSong(prev => prev ? { ...prev, url: streamUrl, videoId } : prev);
+      queueRef.current = queueSource;
+      queueIndexRef.current = Math.max(0, queueSource.findIndex((s) => songKey(s) === songKey(selectedSongWithStream)));
+      setCurrentSong(selectedSongWithStream);
       nativeTrackLoadedRef.current = true;
       nativeShouldPlayRef.current = true;
       setOptimisticPlaying(true);
@@ -1276,7 +1320,9 @@ export default function Home() {
             res.duration > 0 &&
             res.currentTime >= Math.max(0, res.duration - 1)
           ) {
-             handleNext();
+             if (!(nativeAndroid && activeEngineRef.current === 'native-audio')) {
+               handleNext();
+             }
           }
         }
       });
@@ -2323,6 +2369,25 @@ export default function Home() {
 
   // ───── Next / Prev using refs (never stale) ─────
   function handleNext() {
+    if (nativeAndroid && activeEngineRef.current === 'native-audio' && nativeTrackLoadedRef.current) {
+      const q = queueRef.current;
+      if (q && q.length > 0) {
+        const nextIdx = shuffleEnabled
+          ? Math.floor(Math.random() * q.length)
+          : (queueIndexRef.current + 1) % q.length;
+        queueIndexRef.current = nextIdx;
+        const nextSong = q[nextIdx];
+        if (nextSong) {
+          setCurrentSong((prev) => ({ ...(prev || {}), ...nextSong }));
+          setLoadingSongKey(null);
+          setIsLoadingSong(false);
+          isLoadingSongRef.current = false;
+        }
+      }
+      NativeMusicPlayer.next().catch(() => {});
+      return;
+    }
+
     const q = queueRef.current;
     if (!q || q.length === 0) return;
     let nextIdx;
@@ -2337,6 +2402,23 @@ export default function Home() {
   }
 
   function handlePrev() {
+    if (nativeAndroid && activeEngineRef.current === 'native-audio' && nativeTrackLoadedRef.current) {
+      const q = queueRef.current;
+      if (q && q.length > 0) {
+        const prevIdx = queueIndexRef.current <= 0 ? q.length - 1 : queueIndexRef.current - 1;
+        queueIndexRef.current = prevIdx;
+        const prevSong = q[prevIdx];
+        if (prevSong) {
+          setCurrentSong((prev) => ({ ...(prev || {}), ...prevSong }));
+          setLoadingSongKey(null);
+          setIsLoadingSong(false);
+          isLoadingSongRef.current = false;
+        }
+      }
+      NativeMusicPlayer.previous().catch(() => {});
+      return;
+    }
+
     const q = queueRef.current;
     if (!q || q.length === 0) return;
     const prevIdx = queueIndexRef.current <= 0 ? q.length - 1 : queueIndexRef.current - 1;
