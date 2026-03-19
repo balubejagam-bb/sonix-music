@@ -606,7 +606,7 @@ export default function Home() {
     cooldownUntil: 0,
   });
   const nativeAndroid = isNativeAndroid();
-  const nativeAudioEngineEnabled = false;
+  const nativeAudioEngineEnabled = true;
 
   useEffect(() => {
     currentSongRef.current = currentSong;
