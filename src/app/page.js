@@ -2090,33 +2090,10 @@ export default function Home() {
             setIsLoadingSong(false);
             setLoadingSongKey(null);
             prefetchUpcomingVideoIds();
-
-            // Quick async validation. If native failed to start, then switch to fallback.
-            let nativeReady = false;
-            await sleep(350);
-            if (isStale()) return;
-            try {
-              const st = await NativeMusicPlayer.getPosition();
-              const hasProgress = (st?.duration || 0) > 0 || (st?.currentTime || 0) > 0;
-              nativeReady = !!(st?.isPlaying || hasProgress || st?.playWhenReady);
-            } catch {}
-
-            if (!nativeReady) {
-              console.warn('[Android] Native player did not start via ExoPlayer.');
-              registerNativeFailure('native_not_ready');
-              nativeTrackLoadedRef.current = false;
-              setNativeIsPlaying(false);
-              nativeShouldPlayRef.current = false;
-              androidFallbackSong = songWithUrl;
-              forceWebFallback = true;
-              await NativeMusicPlayer.pause().catch(() => {});
-              isLoadingSongRef.current = false;
-              setIsLoadingSong(true);
-              setLoadingSongKey(key);
-              // Continue into web/YT fallback path below.
-            } else {
-              return;
-            }
+            // Do not aggressively fail over after a short probe; on many real devices
+            // ExoPlayer reports position/duration asynchronously and premature fallback
+            // causes loading loops.
+            return;
           }
 
           // Stream resolution failed — fall back to web/YT playback path.
