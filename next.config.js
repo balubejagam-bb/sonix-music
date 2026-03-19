@@ -1,6 +1,8 @@
 /** @type {import('next').NextConfig} */
+const isAndroidStaticExport = process.env.ANDROID_STATIC_EXPORT === '1';
+
 const nextConfig = {
-  output: 'export',
+  ...(isAndroidStaticExport ? { output: 'export' } : {}),
   images: {
     unoptimized: true,
     remotePatterns: [

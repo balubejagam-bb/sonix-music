@@ -20,13 +20,13 @@ function enforceJava17(filePath) {
   }
 }
 
-function run(cmd, args) {
+function run(cmd, args, envOverrides = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
       stdio: 'inherit',
       shell: process.platform === 'win32',
       cwd: root,
-      env: process.env,
+      env: { ...process.env, ...envOverrides },
     });
 
     child.on('exit', (code) => {
@@ -52,7 +52,7 @@ async function main() {
       console.log('Temporarily moved src/app/api for Android static export build.');
     }
 
-    await run('next', ['build']);
+    await run('next', ['build'], { ANDROID_STATIC_EXPORT: '1' });
     await run('npx', ['cap', 'sync', 'android']);
 
     enforceJava17(path.join(root, 'android', 'app', 'capacitor.build.gradle'));
