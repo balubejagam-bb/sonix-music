@@ -67,6 +67,48 @@ public class MusicPlaybackService extends MediaSessionService {
         }
     };
 
+    private boolean playNextNativeOrWrap() {
+        if (player == null || !shouldUseNativeTransport()) return false;
+
+        if (player.hasNextMediaItem()) {
+            ytMode = false;
+            player.seekToNextMediaItem();
+            player.play();
+            return true;
+        }
+
+        final int count = player.getMediaItemCount();
+        if (count > 1) {
+            ytMode = false;
+            player.seekToDefaultPosition(0);
+            player.play();
+            return true;
+        }
+
+        return false;
+    }
+
+    private boolean playPreviousNativeOrWrap() {
+        if (player == null || !shouldUseNativeTransport()) return false;
+
+        if (player.hasPreviousMediaItem()) {
+            ytMode = false;
+            player.seekToPreviousMediaItem();
+            player.play();
+            return true;
+        }
+
+        final int count = player.getMediaItemCount();
+        if (count > 1) {
+            ytMode = false;
+            player.seekToDefaultPosition(count - 1);
+            player.play();
+            return true;
+        }
+
+        return false;
+    }
+
     // ── Pending intents for notification buttons ──────────────────────────────
     private PendingIntent actionIntent(String action, int reqCode) {
         Intent i = new Intent(this, MusicPlaybackService.class);
@@ -197,7 +239,7 @@ public class MusicPlaybackService extends MediaSessionService {
                 // If the native queue reaches terminal END with no next item,
                 // ask the web layer to resolve/play the next logical track.
                 if (state == Player.STATE_ENDED && shouldUseNativeTransport()) {
-                    if (!player.hasNextMediaItem() && player.getPlayWhenReady()) {
+                    if (player.getPlayWhenReady() && !playNextNativeOrWrap()) {
                         MusicPlayerPlugin.triggerWebAction("next");
                     }
                 }
@@ -246,23 +288,13 @@ public class MusicPlaybackService extends MediaSessionService {
                         return androidx.media3.session.SessionResult.RESULT_SUCCESS;
                     }
                     if (playerCommand == Player.COMMAND_SEEK_TO_NEXT) {
-                        if (shouldUseNativeTransport() && player.hasNextMediaItem()) {
-                            ytMode = false;
-                            player.seekToNextMediaItem();
-                            player.play();
-                        } else {
+                        if (!playNextNativeOrWrap()) {
                             MusicPlayerPlugin.triggerWebAction("next");
                         }
                         return androidx.media3.session.SessionResult.RESULT_SUCCESS;
                     }
                     if (playerCommand == Player.COMMAND_SEEK_TO_PREVIOUS) {
-                        if (shouldUseNativeTransport() && player.hasPreviousMediaItem()) {
-                            ytMode = false;
-                            player.seekToPreviousMediaItem();
-                            player.play();
-                        } else if (shouldUseNativeTransport()) {
-                            MusicPlayerPlugin.triggerWebAction("previous");
-                        } else {
+                        if (!playPreviousNativeOrWrap()) {
                             MusicPlayerPlugin.triggerWebAction("previous");
                         }
                         return androidx.media3.session.SessionResult.RESULT_SUCCESS;
@@ -378,25 +410,13 @@ public class MusicPlaybackService extends MediaSessionService {
                     break;
 
                 case ACTION_NEXT:
-                    if (shouldUseNativeTransport() && player.hasNextMediaItem()) {
-                        ytMode = false;
-                        player.seekToNextMediaItem();
-                        player.play();
-                    } else {
+                    if (!playNextNativeOrWrap()) {
                         MusicPlayerPlugin.triggerWebAction("next");
                     }
                     break;
 
                 case ACTION_PREVIOUS:
-                    if (shouldUseNativeTransport()) {
-                        ytMode = false;
-                        if (player.hasPreviousMediaItem()) {
-                            player.seekToPreviousMediaItem();
-                            player.play();
-                        } else {
-                            MusicPlayerPlugin.triggerWebAction("previous");
-                        }
-                    } else {
+                    if (!playPreviousNativeOrWrap()) {
                         MusicPlayerPlugin.triggerWebAction("previous");
                     }
                     break;
