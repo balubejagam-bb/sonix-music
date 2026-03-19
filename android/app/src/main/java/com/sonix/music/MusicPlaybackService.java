@@ -6,7 +6,9 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Intent;
 import android.os.Build;
+import android.os.PowerManager;
 import android.text.TextUtils;
+import android.net.wifi.WifiManager;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
@@ -38,6 +40,8 @@ public class MusicPlaybackService extends MediaSessionService {
     public static final String ACTION_SET_SHUFFLE   = "com.sonix.music.action.SET_SHUFFLE";
     public static final String ACTION_SET_REPEAT    = "com.sonix.music.action.SET_REPEAT";
     public static final String ACTION_TOGGLE_PAUSE  = "com.sonix.music.action.TOGGLE_PAUSE";
+    public static final String ACTION_SEEK_BACKWARD = "com.sonix.music.action.SEEK_BACKWARD";
+    public static final String ACTION_SEEK_FORWARD  = "com.sonix.music.action.SEEK_FORWARD";
 
     // Sent from web to update the notification metadata for YT songs
     public static final String ACTION_UPDATE_META   = "com.sonix.music.action.UPDATE_META";
@@ -53,8 +57,12 @@ public class MusicPlaybackService extends MediaSessionService {
     private boolean ytMode = false;
     private boolean ytPlaying = false;
     private boolean nativeSessionLoaded = false;
+    private int nativeRecoveryAttempts = 0;
+    private long lastExplicitPauseAtMs = 0L;
     private String  currentTitle  = "Sonix Music";
     private String  currentArtist = "Playing...";
+    private PowerManager.WakeLock wakeLock;
+    private WifiManager.WifiLock wifiLock;
 
     private final android.os.Handler updateHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private final Runnable updateRunnable = new Runnable() {
@@ -69,6 +77,72 @@ public class MusicPlaybackService extends MediaSessionService {
 
     private boolean hasNativeQueue() {
         return player != null && player.getMediaItemCount() > 0;
+    }
+
+    private void resetNativeRecovery() {
+        nativeRecoveryAttempts = 0;
+    }
+
+    private void updatePlaybackLocks() {
+        boolean shouldHold = (shouldUseNativeTransport() && player != null && player.isPlaying()) || (ytMode && ytPlaying);
+
+        try {
+            if (shouldHold) {
+                if (wakeLock != null && !wakeLock.isHeld()) {
+                    wakeLock.acquire(10 * 60 * 1000L);
+                }
+                if (wifiLock != null && !wifiLock.isHeld()) {
+                    wifiLock.acquire();
+                }
+            } else {
+                if (wakeLock != null && wakeLock.isHeld()) {
+                    wakeLock.release();
+                }
+                if (wifiLock != null && wifiLock.isHeld()) {
+                    wifiLock.release();
+                }
+            }
+        } catch (Throwable t) {
+            android.util.Log.w("SonixMusic", "Playback lock update failed", t);
+        }
+    }
+
+    private void seekBy(long deltaMs) {
+        if (player == null || ytMode) return;
+        long duration = player.getDuration();
+        long current = Math.max(0L, player.getCurrentPosition());
+        long target = current + deltaMs;
+        if (duration > 0) {
+            target = Math.min(Math.max(0L, target), duration);
+        } else {
+            target = Math.max(0L, target);
+        }
+        player.seekTo(target);
+    }
+
+    private boolean recoverNativePlayback() {
+        if (player == null || !shouldUseNativeTransport() || !hasNativeQueue()) {
+            return false;
+        }
+        if (nativeRecoveryAttempts >= 2) {
+            return false;
+        }
+
+        nativeRecoveryAttempts++;
+        long resumePos = Math.max(0L, player.getCurrentPosition());
+        int itemIndex = Math.max(0, player.getCurrentMediaItemIndex());
+
+        try {
+            ytMode = false;
+            player.stop();
+            player.prepare();
+            player.seekTo(itemIndex, resumePos);
+            player.play();
+            updateForegroundNotification(currentTitle, currentArtist, true);
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private boolean playNextNativeOrWrap() {
@@ -155,12 +229,12 @@ public class MusicPlaybackService extends MediaSessionService {
             .setContentText(currentArtist)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentIntent(contentIntent)
-            // ONGOING only while playing so user can dismiss when paused
-            .setOngoing(playing)
+            // Keep the media service sticky so controls stay visible in background.
+            .setOngoing(true)
             // Show on lock screen AND notification shade
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setSilent(true)
             .setShowWhen(false)
             // Prevent heads-up popup for every state change
@@ -171,15 +245,21 @@ public class MusicPlaybackService extends MediaSessionService {
                 android.R.drawable.ic_media_previous, "Previous",
                 actionIntent(ACTION_PREVIOUS, 1)))
             .addAction(new NotificationCompat.Action(
+                android.R.drawable.ic_media_rew, "Rewind 10s",
+                actionIntent(ACTION_SEEK_BACKWARD, 2)))
+            .addAction(new NotificationCompat.Action(
                 playing ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play,
                 playing ? "Pause" : "Play",
-                actionIntent(ACTION_TOGGLE_PAUSE, 2)))
+                actionIntent(ACTION_TOGGLE_PAUSE, 3)))
+            .addAction(new NotificationCompat.Action(
+                android.R.drawable.ic_media_ff, "Forward 10s",
+                actionIntent(ACTION_SEEK_FORWARD, 4)))
             .addAction(new NotificationCompat.Action(
                 android.R.drawable.ic_media_next, "Next",
-                actionIntent(ACTION_NEXT, 3)))
+                actionIntent(ACTION_NEXT, 5)))
             .setStyle(new androidx.media.app.NotificationCompat.MediaStyle()
                 .setMediaSession(mediaSession.getSessionCompatToken())
-                .setShowActionsInCompactView(0, 1, 2));
+                .setShowActionsInCompactView(1, 2, 3));
 
         Notification notification = builder.build();
 
@@ -201,6 +281,17 @@ public class MusicPlaybackService extends MediaSessionService {
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build();
+
+        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        if (pm != null) {
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sonix:playback_wakelock");
+            wakeLock.setReferenceCounted(false);
+        }
+        WifiManager wm = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
+        if (wm != null) {
+            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "sonix:playback_wifilock");
+            wifiLock.setReferenceCounted(false);
+        }
 
         androidx.media3.exoplayer.DefaultLoadControl loadControl =
             new androidx.media3.exoplayer.DefaultLoadControl.Builder()
@@ -224,6 +315,8 @@ public class MusicPlaybackService extends MediaSessionService {
                         .add(Player.COMMAND_SEEK_TO_NEXT)
                         .add(Player.COMMAND_SEEK_TO_PREVIOUS)
                         .add(Player.COMMAND_PLAY_PAUSE)
+                        .add(Player.COMMAND_SEEK_BACK)
+                        .add(Player.COMMAND_SEEK_FORWARD)
                         .build();
                 }
                 @Override
@@ -231,6 +324,8 @@ public class MusicPlaybackService extends MediaSessionService {
                     return command == Player.COMMAND_SEEK_TO_NEXT
                         || command == Player.COMMAND_SEEK_TO_PREVIOUS
                         || command == Player.COMMAND_PLAY_PAUSE
+                        || command == Player.COMMAND_SEEK_BACK
+                        || command == Player.COMMAND_SEEK_FORWARD
                         || super.isCommandAvailable(command);
                 }
             };
@@ -240,6 +335,9 @@ public class MusicPlaybackService extends MediaSessionService {
         fp.addListener(new Player.Listener() {
             @Override public void onPlaybackStateChanged(int state) {
                 notifyState();
+                if (state == Player.STATE_READY) {
+                    resetNativeRecovery();
+                }
                 // If the native queue reaches terminal END with no next item,
                 // ask the web layer to resolve/play the next logical track.
                 if (state == Player.STATE_ENDED && shouldUseNativeTransport()) {
@@ -248,13 +346,29 @@ public class MusicPlaybackService extends MediaSessionService {
                     }
                 }
             }
+            @Override
+            public void onMediaItemTransition(@Nullable MediaItem mediaItem, int reason) {
+                resetNativeRecovery();
+                notifyState();
+            }
             @Override public void onIsPlayingChanged(boolean isPlaying) {
                 notifyState();
                 if (isPlaying) updateHandler.post(updateRunnable);
                 else           updateHandler.removeCallbacks(updateRunnable);
+                updatePlaybackLocks();
             }
             @Override public void onPlayerError(androidx.media3.common.PlaybackException e) {
                 android.util.Log.e("SonixMusic", "Player error: " + e.getMessage(), e);
+                if (recoverNativePlayback()) {
+                    android.util.Log.w("SonixMusic", "Recovered native playback after error");
+                    return;
+                }
+
+                if (playNextNativeOrWrap()) {
+                    android.util.Log.w("SonixMusic", "Skipped failed track after native playback error");
+                    return;
+                }
+
                 MusicPlayerPlugin.triggerWebAction("native_error");
             }
             @Override public void onMediaMetadataChanged(MediaMetadata m) { notifyState(); }
@@ -269,6 +383,8 @@ public class MusicPlaybackService extends MediaSessionService {
                         .add(Player.COMMAND_PLAY_PAUSE)
                         .add(Player.COMMAND_SEEK_TO_NEXT)
                         .add(Player.COMMAND_SEEK_TO_PREVIOUS)
+                        .add(Player.COMMAND_SEEK_BACK)
+                        .add(Player.COMMAND_SEEK_FORWARD)
                         .add(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
                         .add(Player.COMMAND_STOP)
                         .build();
@@ -304,6 +420,14 @@ public class MusicPlaybackService extends MediaSessionService {
                         }
                         return androidx.media3.session.SessionResult.RESULT_SUCCESS;
                     }
+                    if (playerCommand == Player.COMMAND_SEEK_BACK) {
+                        seekBy(-10_000L);
+                        return androidx.media3.session.SessionResult.RESULT_SUCCESS;
+                    }
+                    if (playerCommand == Player.COMMAND_SEEK_FORWARD) {
+                        seekBy(10_000L);
+                        return androidx.media3.session.SessionResult.RESULT_SUCCESS;
+                    }
                     return androidx.media3.session.SessionResult.RESULT_SUCCESS;
                 }
             })
@@ -328,6 +452,7 @@ public class MusicPlaybackService extends MediaSessionService {
         if (player.getPlaybackState() != Player.STATE_IDLE) {
             updateForegroundNotification(title, artist, player.isPlaying());
         }
+        updatePlaybackLocks();
     }
 
     private boolean shouldUseNativeTransport() {
@@ -359,12 +484,14 @@ public class MusicPlaybackService extends MediaSessionService {
                 case ACTION_PLAY_SINGLE:
                     ytMode = false;
                     nativeSessionLoaded = true;
+                    resetNativeRecovery();
                     playSingle(intent);
                     break;
 
                 case ACTION_PLAY_QUEUE:
                     ytMode = false;
                     nativeSessionLoaded = true;
+                    resetNativeRecovery();
                     playQueue(intent);
                     break;
 
@@ -375,15 +502,23 @@ public class MusicPlaybackService extends MediaSessionService {
                         ytMode = true;
                         nativeSessionLoaded = false;
                     }
-                    ytPlaying = intent.getBooleanExtra("isPlaying", true);
+                    boolean incomingPlaying = intent.getBooleanExtra("isPlaying", true);
+                    long now = System.currentTimeMillis();
+                    if (!incomingPlaying && ytMode && ytPlaying && (now - lastExplicitPauseAtMs) > 3000L) {
+                        incomingPlaying = true;
+                        MusicPlayerPlugin.triggerWebAction("play");
+                    }
+                    ytPlaying = incomingPlaying;
                     currentTitle  = intent.getStringExtra("title")  != null
                         ? intent.getStringExtra("title")  : "Sonix Music";
                     currentArtist = intent.getStringExtra("artist") != null
                         ? intent.getStringExtra("artist") : "Playing...";
                     updateForegroundNotification(currentTitle, currentArtist, ytPlaying);
+                    updatePlaybackLocks();
                     break;
 
                 case ACTION_PAUSE:
+                    lastExplicitPauseAtMs = System.currentTimeMillis();
                     if (shouldUseNativeTransport()) {
                         ytMode = false;
                         player.pause();
@@ -391,6 +526,7 @@ public class MusicPlaybackService extends MediaSessionService {
                         ytPlaying = false;
                         MusicPlayerPlugin.triggerWebAction("pause");
                         updateForegroundNotification(currentTitle, currentArtist, false);
+                        updatePlaybackLocks();
                     }
                     break;
 
@@ -402,6 +538,7 @@ public class MusicPlaybackService extends MediaSessionService {
                         ytPlaying = true;
                         MusicPlayerPlugin.triggerWebAction("play");
                         updateForegroundNotification(currentTitle, currentArtist, true);
+                        updatePlaybackLocks();
                     }
                     break;
 
@@ -411,9 +548,25 @@ public class MusicPlaybackService extends MediaSessionService {
                         if (player.isPlaying()) player.pause();
                         else                    player.play();
                     } else if (ytMode) {
+                        if (ytPlaying) {
+                            lastExplicitPauseAtMs = System.currentTimeMillis();
+                        }
                         ytPlaying = !ytPlaying;
                         MusicPlayerPlugin.triggerWebAction(ytPlaying ? "play" : "pause");
                         updateForegroundNotification(currentTitle, currentArtist, ytPlaying);
+                        updatePlaybackLocks();
+                    }
+                    break;
+
+                case ACTION_SEEK_BACKWARD:
+                    if (shouldUseNativeTransport()) {
+                        seekBy(-10_000L);
+                    }
+                    break;
+
+                case ACTION_SEEK_FORWARD:
+                    if (shouldUseNativeTransport()) {
+                        seekBy(10_000L);
                     }
                     break;
 
@@ -432,7 +585,9 @@ public class MusicPlaybackService extends MediaSessionService {
                 case ACTION_STOP:
                     ytMode = false;
                     nativeSessionLoaded = false;
+                    resetNativeRecovery();
                     player.stop();
+                    updatePlaybackLocks();
                     stopForeground(true);
                     stopSelf();
                     break;
@@ -532,9 +687,9 @@ public class MusicPlaybackService extends MediaSessionService {
         if (ytMode && ytPlaying) {
             return;
         }
-        if (!player.getPlayWhenReady()
+        if (player != null && (!player.getPlayWhenReady()
                 || player.getPlaybackState() == Player.STATE_IDLE
-                || player.getPlaybackState() == Player.STATE_ENDED) {
+                || player.getPlaybackState() == Player.STATE_ENDED)) {
             stopSelf();
         }
     }
@@ -542,6 +697,12 @@ public class MusicPlaybackService extends MediaSessionService {
     @Override
     public void onDestroy() {
         updateHandler.removeCallbacks(updateRunnable);
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        } catch (Throwable ignored) {}
+        try {
+            if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
+        } catch (Throwable ignored) {}
         if (mediaSession != null) { mediaSession.release(); mediaSession = null; }
         if (player != null)       { player.release();       player = null; }
         super.onDestroy();

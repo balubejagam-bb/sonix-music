@@ -1261,8 +1261,9 @@ export default function Home() {
 
   // Listen to native player for progress updates and web actions
   useEffect(() => {
-    if (nativeAudioActive) {
+    if (nativeAndroid && canUseNativePlugins()) {
       const stateListener = NativeMusicPlayer.addListener('onStateChanged', (res) => {
+        if (!nativeAudioActive) return;
         if (res) {
           updateNativePlaybackSnapshot(res);
           // Native state events can be partial; do not force-reset timer to 0.
@@ -1386,75 +1387,78 @@ export default function Home() {
       });
 
       // Fallback polling (less frequent)
-      const timer = setInterval(async () => {
-        try {
-          const res = await NativeMusicPlayer.getPosition();
-          if (res && res.currentTime !== undefined) {
-             updateNativePlaybackSnapshot(res);
-             const nextCurrentTime = typeof res.currentTime === 'number' && !Number.isNaN(res.currentTime)
-               ? res.currentTime
-               : undefined;
-             const nextDuration = typeof res.duration === 'number' && res.duration > 0
-               ? res.duration
-               : undefined;
-             if (shouldApplyNativeProgress(nextCurrentTime)) {
-               yt.updateNativeTime(nextCurrentTime, nextDuration);
-               if (
-                 typeof nextCurrentTime === 'number' &&
-                 nextCurrentTime > lastNativeProgressRef.current.time + 0.15
-               ) {
-                 lastNativeProgressRef.current = { time: nextCurrentTime, at: Date.now() };
+      let timer = null;
+      if (nativeAudioActive) {
+        timer = setInterval(async () => {
+          try {
+            const res = await NativeMusicPlayer.getPosition();
+            if (res && res.currentTime !== undefined) {
+               updateNativePlaybackSnapshot(res);
+               const nextCurrentTime = typeof res.currentTime === 'number' && !Number.isNaN(res.currentTime)
+                 ? res.currentTime
+                 : undefined;
+               const nextDuration = typeof res.duration === 'number' && res.duration > 0
+                 ? res.duration
+                 : undefined;
+               if (shouldApplyNativeProgress(nextCurrentTime)) {
+                 yt.updateNativeTime(nextCurrentTime, nextDuration);
+                 if (
+                   typeof nextCurrentTime === 'number' &&
+                   nextCurrentTime > lastNativeProgressRef.current.time + 0.15
+                 ) {
+                   lastNativeProgressRef.current = { time: nextCurrentTime, at: Date.now() };
+                 }
                }
-             }
-             if (typeof res.isPlaying === 'boolean') {
-               const recentNativeProgress = Date.now() - lastNativeProgressRef.current.at < 4000;
-               const nativeReadyState =
-                 (res.playbackState === 2 || res.playbackState === 3) &&
-                 (
-                   optimisticPlayingRef.current ||
-                   nativeShouldPlayRef.current ||
-                   res.playWhenReady ||
-                   recentNativeProgress
-                 );
-               const nativeLooksLoaded =
-                 !!res.isPlaying ||
-                 !!res.playWhenReady ||
-                 recentNativeProgress ||
-                 (typeof res.duration === 'number' && res.duration > 0);
-               if (nativeReadyState) {
-                 activeEngineRef.current = 'native-audio';
-                 nativeTrackLoadedRef.current = true;
-                 nativeShouldPlayRef.current = true;
-                 setNativeIsPlaying(true);
-                 setOptimisticPlaying(true);
-               } else if (res.isPlaying) {
-                 activeEngineRef.current = 'native-audio';
-                 nativeTrackLoadedRef.current = true;
-                 nativeShouldPlayRef.current = true;
-                 setNativeIsPlaying(true);
-                 setOptimisticPlaying(true);
-               } else {
-                 if (nativeLooksLoaded) {
+               if (typeof res.isPlaying === 'boolean') {
+                 const recentNativeProgress = Date.now() - lastNativeProgressRef.current.at < 4000;
+                 const nativeReadyState =
+                   (res.playbackState === 2 || res.playbackState === 3) &&
+                   (
+                     optimisticPlayingRef.current ||
+                     nativeShouldPlayRef.current ||
+                     res.playWhenReady ||
+                     recentNativeProgress
+                   );
+                 const nativeLooksLoaded =
+                   !!res.isPlaying ||
+                   !!res.playWhenReady ||
+                   recentNativeProgress ||
+                   (typeof res.duration === 'number' && res.duration > 0);
+                 if (nativeReadyState) {
                    activeEngineRef.current = 'native-audio';
                    nativeTrackLoadedRef.current = true;
-                 }
-                 setNativeIsPlaying(false);
-                 if (!nativeShouldPlayRef.current || res.playbackState === 4) {
-                   setOptimisticPlaying(false);
+                   nativeShouldPlayRef.current = true;
+                   setNativeIsPlaying(true);
+                   setOptimisticPlaying(true);
+                 } else if (res.isPlaying) {
+                   activeEngineRef.current = 'native-audio';
+                   nativeTrackLoadedRef.current = true;
+                   nativeShouldPlayRef.current = true;
+                   setNativeIsPlaying(true);
+                   setOptimisticPlaying(true);
+                 } else {
+                   if (nativeLooksLoaded) {
+                     activeEngineRef.current = 'native-audio';
+                     nativeTrackLoadedRef.current = true;
+                   }
+                   setNativeIsPlaying(false);
+                   if (!nativeShouldPlayRef.current || res.playbackState === 4) {
+                     setOptimisticPlaying(false);
+                   }
                  }
                }
-             }
-            }
-          } catch (e) {}
-        }, 2500);
+              }
+            } catch (e) {}
+          }, 2500);
+      }
 
         return () => {
           stateListener.remove();
           actionListener.remove();
-          clearInterval(timer);
+          if (timer) clearInterval(timer);
         };
       }
-    }, [nativeAndroid]);
+    }, [nativeAndroid, nativeAudioActive]);
 
 
   async function fetchJsonWithFallback(paths) {
@@ -2369,7 +2373,7 @@ export default function Home() {
   }, [currentSong, yt.isPlaying, nativeAndroid, videoEnabled, nativeIsPlaying, optimisticPlaying]);
 
   useEffect(() => {
-    if (!nativeAudioActive || !currentSong || !canUseNativePlugins()) return;
+    if (!nativeAndroid || !currentSong || !canUseNativePlugins()) return;
 
     const engine = activeEngineRef.current;
     if (engine !== 'web-video' && engine !== 'web-audio') return;

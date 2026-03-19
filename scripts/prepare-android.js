@@ -40,7 +40,6 @@ function run(cmd, args, envOverrides = {}) {
 
 async function main() {
   let moved = false;
-
   try {
     if (fs.existsSync(apiBackupDir)) {
       throw new Error('Backup API directory already exists: src/app/_api_android_backup');
