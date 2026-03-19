@@ -774,21 +774,51 @@ export default function Home() {
       /media|cdn|stream|audio|saavncdn|jiosaavn/i.test(url);
   }
 
-  function buildNativeQueue(sourceQueue = [], selectedSong = null) {
-    const queue = sourceQueue
-      .filter((s) => typeof s?.url === 'string' && /^https?:\/\//i.test(s.url))
-      .map((s) => ({
-        url: s.url,
-        title: s.title || 'Unknown Track',
-        artist: s.artist || 'Unknown Artist',
-        album: s.album || 'Sonix Music',
-        artwork: s.image || s.thumbnail || '',
-      }));
+  function buildNativeQueue(sourceQueue = [], selectedSong = null, selectedResolvedUrl = '') {
+    const seen = new Set();
+    const queue = [];
+    const selectedKey = selectedSong ? songKey(selectedSong) : null;
 
-    if (!queue.length && selectedSong && canPlayNatively(selectedSong)) {
+    const pushSong = (candidate) => {
+      if (!candidate) return;
+      const key = songKey(candidate);
+      if (seen.has(key)) return;
+
+      let url = '';
+      if (selectedKey && key === selectedKey && /^https?:\/\//i.test(selectedResolvedUrl || '')) {
+        url = selectedResolvedUrl;
+      } else if (typeof candidate.url === 'string' && /^https?:\/\//i.test(candidate.url)) {
+        url = candidate.url;
+      }
+
+      if (!isLikelyDirectAudioUrl(url)) {
+        const cached =
+          streamUrlCacheRef.current.get(key) ||
+          (typeof window !== 'undefined' ? localStorage.getItem(`sonix_stream_${key}`) : null);
+        if (cached && /^https?:\/\//i.test(cached)) {
+          url = cached;
+        }
+      }
+
+      if (!/^https?:\/\//i.test(url)) return;
+
+      queue.push({
+        url,
+        title: candidate.title || 'Unknown Track',
+        artist: candidate.artist || 'Unknown Artist',
+        album: candidate.album || 'Sonix Music',
+        artwork: candidate.image || candidate.thumbnail || '',
+      });
+      seen.add(key);
+    };
+
+    if (selectedSong) pushSong(selectedSong);
+    for (const s of sourceQueue) pushSong(s);
+
+    if (!queue.length && selectedSong && /^https?:\/\//i.test(selectedResolvedUrl || selectedSong.url || '')) {
       return {
         queue: [{
-          url: selectedSong.url,
+          url: selectedResolvedUrl || selectedSong.url,
           title: selectedSong.title || 'Unknown Track',
           artist: selectedSong.artist || 'Unknown Artist',
           album: selectedSong.album || 'Sonix Music',
@@ -798,7 +828,7 @@ export default function Home() {
       };
     }
 
-    const selectedUrl = selectedSong?.url || '';
+    const selectedUrl = selectedResolvedUrl || selectedSong?.url || '';
     const index = Math.max(0, queue.findIndex((s) => s.url === selectedUrl));
     return { queue, index };
   }
@@ -892,6 +922,18 @@ export default function Home() {
     const handoffToNativeBackground = async () => {
       if (!nativeAndroid || !currentSong || !canUseNativePlugins()) return false;
 
+      // Do not collapse an existing native queue while already on native audio.
+      if (
+        activeEngineRef.current === 'native-audio' &&
+        nativeTrackLoadedRef.current &&
+        (nativeIsPlaying || nativeShouldPlayRef.current)
+      ) {
+        if (!nativeIsPlaying && nativeShouldPlayRef.current) {
+          NativeMusicPlayer.resume().catch(() => {});
+        }
+        return true;
+      }
+
       const resumeAt = yt.currentTime || 0;
       const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
       if (!videoId) return false;
@@ -899,15 +941,14 @@ export default function Home() {
       const streamUrl = await resolveAudioStreamForSong(currentSong, videoId, { prefetch: true });
       if (!streamUrl) return false;
 
+      const queueSource = queueRef.current?.length ? queueRef.current : [currentSong];
+      const selectedSong = { ...currentSong, url: streamUrl, videoId };
+      const { queue: nativeQueue, index: nativeIndex } = buildNativeQueue(queueSource, selectedSong, streamUrl);
+      if (!nativeQueue.length) return false;
+
       await NativeMusicPlayer.playQueue({
-        queue: [{
-          url: streamUrl,
-          title: currentSong.title || 'Unknown Track',
-          artist: currentSong.artist || 'Unknown Artist',
-          album: currentSong.album || 'Sonix Music',
-          artwork: currentSong.image || currentSong.thumbnail || '',
-        }],
-        index: 0,
+        queue: nativeQueue,
+        index: nativeIndex,
         shuffle: shuffleEnabled,
         repeatMode,
       });
@@ -2590,17 +2631,16 @@ export default function Home() {
         try {
           const streamUrl = await resolveAudioStreamForSong(nativeSourceSong, videoId, { prefetch: true });
           if (streamUrl) {
-            const artwork = currentSong.image || currentSong.thumbnail || '';
+            const queueSource = queueRef.current?.length ? queueRef.current : [currentSong];
+            const selectedSong = { ...currentSong, url: streamUrl, videoId };
+            const { queue: nativeQueue, index: nativeIndex } = buildNativeQueue(queueSource, selectedSong, streamUrl);
+            if (!nativeQueue.length) {
+              throw new Error('Native queue is empty after stream resolution');
+            }
             await enforceEngineLock('native-audio');
             await NativeMusicPlayer.playQueue({
-              queue: [{
-                url: streamUrl,
-                title: currentSong.title || 'Unknown Track',
-                artist: currentSong.artist || 'Unknown Artist',
-                album: currentSong.album || 'Sonix Music',
-                artwork,
-              }],
-              index: 0,
+              queue: nativeQueue,
+              index: nativeIndex,
               shuffle: shuffleEnabled,
               repeatMode,
             });
