@@ -774,23 +774,6 @@ export default function Home() {
       /media|cdn|stream|audio|saavncdn|jiosaavn/i.test(url);
   }
 
-  function toNativePlayableUrl(url = '') {
-    if (!nativeAndroid) return url;
-    if (!/^https?:\/\//i.test(url)) return url;
-
-    const ownBase = resolveApiBase();
-    if (ownBase && url.startsWith(`${ownBase}/api/audio-proxy?`)) return url;
-
-    try {
-      const parsed = new URL(url);
-      if (parsed.pathname === '/api/audio-proxy') return url;
-    } catch {
-      return url;
-    }
-
-    return apiPath(`/api/audio-proxy?url=${encodeURIComponent(url)}`);
-  }
-
   function buildNativeQueue(sourceQueue = [], selectedSong = null) {
     const queue = sourceQueue
       .filter((s) => typeof s?.url === 'string' && /^https?:\/\//i.test(s.url))
@@ -915,11 +898,10 @@ export default function Home() {
 
       const streamUrl = await resolveAudioStreamForSong(currentSong, videoId, { prefetch: true });
       if (!streamUrl) return false;
-      const nativeStreamUrl = toNativePlayableUrl(streamUrl);
 
       await NativeMusicPlayer.playQueue({
         queue: [{
-          url: nativeStreamUrl,
+          url: streamUrl,
           title: currentSong.title || 'Unknown Track',
           artist: currentSong.artist || 'Unknown Artist',
           album: currentSong.album || 'Sonix Music',
@@ -935,7 +917,7 @@ export default function Home() {
       }
 
       yt.pause();
-      setCurrentSong(prev => prev ? { ...prev, url: nativeStreamUrl, videoId } : prev);
+      setCurrentSong(prev => prev ? { ...prev, url: streamUrl, videoId } : prev);
       nativeTrackLoadedRef.current = true;
       nativeShouldPlayRef.current = true;
       setOptimisticPlaying(true);
@@ -2005,7 +1987,7 @@ export default function Home() {
               if (!cUrl || !/^https?:\/\//i.test(cUrl)) return;
 
               nativePlayable.push({
-                url: toNativePlayableUrl(cUrl),
+                url: cUrl,
                 title: candidate.title || 'Unknown Track',
                 artist: candidate.artist || 'Unknown Artist',
                 album: candidate.album || 'Sonix Music',
@@ -2603,12 +2585,11 @@ export default function Home() {
         try {
           const streamUrl = await resolveAudioStreamForSong(nativeSourceSong, videoId, { prefetch: true });
           if (streamUrl) {
-            const nativeStreamUrl = toNativePlayableUrl(streamUrl);
             const artwork = currentSong.image || currentSong.thumbnail || '';
             await enforceEngineLock('native-audio');
             await NativeMusicPlayer.playQueue({
               queue: [{
-                url: nativeStreamUrl,
+                url: streamUrl,
                 title: currentSong.title || 'Unknown Track',
                 artist: currentSong.artist || 'Unknown Artist',
                 album: currentSong.album || 'Sonix Music',
@@ -2622,7 +2603,7 @@ export default function Home() {
             // Pause video only after native queue is accepted to avoid audible dead-air.
             yt.pause();
 
-            setCurrentSong(prev => prev ? { ...prev, url: nativeStreamUrl, videoId } : prev);
+            setCurrentSong(prev => prev ? { ...prev, url: streamUrl, videoId } : prev);
             nativeTrackLoadedRef.current = true;
             nativeShouldPlayRef.current = true;
             setNativeIsPlaying(true);
