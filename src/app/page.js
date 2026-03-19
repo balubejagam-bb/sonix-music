@@ -608,6 +608,7 @@ export default function Home() {
   const nativeAndroid = isNativeAndroid();
   const nativeAudioEngineEnabled = true;
   const nativeHardDisabledRef = useRef(true);
+  const nativeAudioActive = nativeAudioEngineEnabled && !nativeHardDisabledRef.current;
 
   useEffect(() => {
     currentSongRef.current = currentSong;
@@ -739,7 +740,7 @@ export default function Home() {
       return;
     }
 
-    if (nativeAudioEngineEnabled && (nativeTrackLoadedRef.current || nativeIsPlaying || nativeShouldPlayRef.current)) {
+    if (nativeAudioActive && (nativeTrackLoadedRef.current || nativeIsPlaying || nativeShouldPlayRef.current)) {
       await NativeMusicPlayer.pause().catch(() => {});
     }
     setNativeIsPlaying(false);
@@ -944,7 +945,7 @@ export default function Home() {
 
   useEffect(() => {
     const handoffToNativeBackground = async () => {
-      if (!nativeAudioEngineEnabled || !currentSong || !canUseNativePlugins()) return false;
+      if (!nativeAudioActive || !currentSong || !canUseNativePlugins()) return false;
 
       // Do not collapse an existing native queue while already on native audio.
       if (
@@ -1260,7 +1261,7 @@ export default function Home() {
 
   // Listen to native player for progress updates and web actions
   useEffect(() => {
-    if (nativeAudioEngineEnabled) {
+    if (nativeAudioActive) {
       const stateListener = NativeMusicPlayer.addListener('onStateChanged', (res) => {
         if (res) {
           updateNativePlaybackSnapshot(res);
@@ -1967,7 +1968,7 @@ export default function Home() {
     try {
       // On Android: use native ExoPlayer only for Audio mode.
       // Keep Video mode on web/YT path so users can use video playback intentionally.
-      if (nativeAudioEngineEnabled && !videoEnabled && canUseNativePlugins()) {
+      if (nativeAudioActive && !videoEnabled && canUseNativePlugins()) {
         if (!canAttemptNativePlayback()) {
           forceWebFallback = true;
         }
@@ -2323,13 +2324,13 @@ export default function Home() {
         });
         navigator.mediaSession.playbackState = 'playing';
         navigator.mediaSession.setActionHandler('play', () => {
-          const uiPlayingState = nativeAndroid && !videoEnabled
+          const uiPlayingState = nativeAudioActive && !videoEnabled
             ? (nativeIsPlaying || nativeShouldPlayRef.current || optimisticPlayingRef.current)
             : yt.isPlaying;
           if (!uiPlayingState) handlePlayPauseToggle();
         });
         navigator.mediaSession.setActionHandler('pause', () => {
-          const uiPlayingState = nativeAndroid && !videoEnabled
+          const uiPlayingState = nativeAudioActive && !videoEnabled
             ? (nativeIsPlaying || nativeShouldPlayRef.current || optimisticPlayingRef.current)
             : yt.isPlaying;
           if (uiPlayingState) handlePlayPauseToggle();
@@ -2357,7 +2358,7 @@ export default function Home() {
 
   useEffect(() => {
     if (!currentSong) return;
-    const uiPlayingState = nativeAndroid && !videoEnabled
+    const uiPlayingState = nativeAudioActive && !videoEnabled
       ? (nativeIsPlaying || optimisticPlaying)
       : yt.isPlaying;
     syncNativeMediaControls(currentSong, uiPlayingState);
@@ -2368,7 +2369,7 @@ export default function Home() {
   }, [currentSong, yt.isPlaying, nativeAndroid, videoEnabled, nativeIsPlaying, optimisticPlaying]);
 
   useEffect(() => {
-    if (!nativeAudioEngineEnabled || !currentSong || !canUseNativePlugins()) return;
+    if (!nativeAudioActive || !currentSong || !canUseNativePlugins()) return;
 
     const engine = activeEngineRef.current;
     if (engine !== 'web-video' && engine !== 'web-audio') return;
@@ -2776,7 +2777,7 @@ export default function Home() {
 
     const resumeAt = yt.currentTime || 0;
 
-    if (nativeAudioEngineEnabled) {
+    if (nativeAudioActive) {
       try {
         await NativeMusicPlayer.pause();
       } catch {}
@@ -2810,7 +2811,7 @@ export default function Home() {
 
     const resumeAt = yt.currentTime || 0;
 
-    if (nativeAudioEngineEnabled) {
+    if (nativeAudioActive) {
       const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
       const nativeSourceSong = {
         ...currentSong,
@@ -2917,7 +2918,7 @@ export default function Home() {
 
 
   async function handlePlayPauseToggle() {
-    if (nativeAudioEngineEnabled && currentSong && !videoEnabled) {
+    if (nativeAudioActive && currentSong && !videoEnabled) {
       try {
         const canControlNative =
           activeEngineRef.current === 'native-audio' &&
@@ -3005,7 +3006,7 @@ export default function Home() {
     const t = Math.max(0, timeInSeconds);
     const uiDuration = yt.duration > 0 ? yt.duration : Math.max(0, Number(currentSong?.duration || 0));
 
-    if (nativeAudioEngineEnabled && !videoEnabled && canUseNativePlugins() && nativeTrackLoadedRef.current) {
+    if (nativeAudioActive && !videoEnabled && canUseNativePlugins() && nativeTrackLoadedRef.current) {
       // Optimistically update seek bar immediately in native mode too.
       yt.updateNativeTime(t, uiDuration > 0 ? uiDuration : undefined);
       NativeMusicPlayer.seekTo({ positionMs: t * 1000 }).catch(() => {});
@@ -3046,7 +3047,7 @@ export default function Home() {
   async function handleToggleShuffle() {
     const next = !shuffleEnabled;
     setShuffleEnabled(next);
-    if (nativeAudioEngineEnabled) {
+    if (nativeAudioActive) {
       try {
         await NativeMusicPlayer.setShuffle({ enabled: next });
       } catch (e) {
@@ -3060,7 +3061,7 @@ export default function Home() {
     const idx = order.indexOf(repeatMode);
     const next = order[(idx + 1) % order.length];
     setRepeatMode(next);
-    if (nativeAudioEngineEnabled) {
+    if (nativeAudioActive) {
       try {
         await NativeMusicPlayer.setRepeatMode({ mode: next });
       } catch (e) {
@@ -3075,7 +3076,7 @@ export default function Home() {
     nativeShouldPlayRef.current ||
     (Date.now() - lastNativeProgressRef.current.at < 4000) ||
     (isLoadingSong && optimisticPlaying);
-  const activePlaying = nativeAndroid
+  const activePlaying = nativeAudioActive
     ? (videoEnabled ? webUiPlaying : nativeUiPlaying)
     : webUiPlaying;
   const durationForUi = yt.duration > 0 ? yt.duration : Math.max(0, Number(currentSong?.duration || 0));
