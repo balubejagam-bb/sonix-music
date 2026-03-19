@@ -1914,7 +1914,7 @@ export default function Home() {
       isLoadingSongRef.current = false;
       setIsLoadingSong(false);
       setLoadingSongKey(null);
-    }, nativeAndroid ? 14000 : 22000);
+    }, nativeAndroid ? 12000 : 12000);
 
     if (songList) {
       const idx = songList.findIndex(s => songKey(s) === key);
@@ -2622,6 +2622,12 @@ export default function Home() {
     const key = songKey(song);
     const preferFast = options?.prefetch === true;
 
+    if (isLikelyDirectAudioUrl(song.url || '')) {
+      try { localStorage.setItem(`sonix_stream_${key}`, song.url); } catch {}
+      streamUrlCacheRef.current.set(key, song.url);
+      return song.url;
+    }
+
     const cachedStream = streamUrlCacheRef.current.get(key) || localStorage.getItem(`sonix_stream_${key}`);
     if (cachedStream && /^https?:\/\//i.test(cachedStream)) {
       return cachedStream;
@@ -2632,8 +2638,8 @@ export default function Home() {
     }
 
     const resolverTask = (async () => {
-      const androidFastStreamTimeout = 10000;
-      const androidFastLookupTimeout = 7000;
+      const androidFastStreamTimeout = preferFast ? 3500 : (nativeAndroid ? 5000 : 4500);
+      const androidFastLookupTimeout = preferFast ? 3000 : (nativeAndroid ? 4500 : 4000);
       let resolved = null;
       let fallbackVideoId = normalizeVideoId(videoId);
 
