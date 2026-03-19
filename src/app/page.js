@@ -574,6 +574,7 @@ export default function Home() {
 
   // Use refs for queue to avoid stale closures in next/prev
   const queueRef = useRef([]);
+  const currentSongRef = useRef(null);
   const queueIndexRef = useRef(0);
   const playRequestIdRef = useRef(0);
   const playStartTimeoutRef = useRef(null);
@@ -605,6 +606,10 @@ export default function Home() {
     cooldownUntil: 0,
   });
   const nativeAndroid = isNativeAndroid();
+
+  useEffect(() => {
+    currentSongRef.current = currentSong;
+  }, [currentSong]);
 
   function apiPath(path) {
     return clientApiPath(path);
@@ -2360,6 +2365,19 @@ export default function Home() {
     if (!q || q.length === 0) return -1;
 
     const currentIdx = Math.max(0, Math.min(queueIndexRef.current, q.length - 1));
+    const currentKey = songKey(q[currentIdx]);
+
+    const findDistinct = (startIdx, step) => {
+      if (q.length <= 1) return startIdx;
+      let idx = startIdx;
+      for (let i = 0; i < q.length; i++) {
+        idx = (idx + step + q.length) % q.length;
+        if (songKey(q[idx]) !== currentKey) {
+          return idx;
+        }
+      }
+      return startIdx;
+    };
 
     if (reason === 'ended' && repeatMode === 'one') {
       return currentIdx;
@@ -2368,27 +2386,28 @@ export default function Home() {
     if (shuffleEnabled) {
       if (q.length === 1) return currentIdx;
       let idx = Math.floor(Math.random() * q.length);
-      if (idx === currentIdx) {
-        idx = (idx + 1) % q.length;
+      if (idx === currentIdx || songKey(q[idx]) === currentKey) {
+        idx = findDistinct(idx, 1);
       }
       return idx;
     }
 
     if (direction === 'previous') {
-      return currentIdx <= 0 ? q.length - 1 : currentIdx - 1;
+      return findDistinct(currentIdx, -1);
     }
 
     if (reason === 'ended' && repeatMode === 'off' && currentIdx >= q.length - 1) {
       return -1;
     }
 
-    return (currentIdx + 1) % q.length;
+    return findDistinct(currentIdx, 1);
   }
 
   function syncQueueIndexToCurrentSong() {
     const q = queueRef.current;
-    if (!q || q.length === 0 || !currentSong) return;
-    const key = songKey(currentSong);
+    const activeSong = currentSongRef.current;
+    if (!q || q.length === 0 || !activeSong) return;
+    const key = songKey(activeSong);
     const idx = q.findIndex((s) => songKey(s) === key);
     if (idx >= 0) {
       queueIndexRef.current = idx;
@@ -2413,7 +2432,8 @@ export default function Home() {
 
     queueRecoveryRef.current = {
       timer: setTimeout(() => {
-        const stillTarget = currentSong && songKey(currentSong) === targetKey;
+        const activeSong = currentSongRef.current;
+        const stillTarget = activeSong && songKey(activeSong) === targetKey;
         const isPlayingNow = nativeAndroid
           ? (nativeIsPlaying || nativeShouldPlayRef.current)
           : yt.isPlaying;
@@ -2487,8 +2507,9 @@ export default function Home() {
 
   useEffect(() => {
     const recovery = queueRecoveryRef.current;
-    if (!recovery.targetKey || !currentSong) return;
-    if (songKey(currentSong) !== recovery.targetKey) return;
+    const activeSong = currentSongRef.current;
+    if (!recovery.targetKey || !activeSong) return;
+    if (songKey(activeSong) !== recovery.targetKey) return;
 
     const isPlayingNow = nativeAndroid
       ? (nativeIsPlaying || nativeShouldPlayRef.current)
@@ -2500,6 +2521,15 @@ export default function Home() {
       queueRecoveryRef.current = { timer: null, targetKey: '', attempts: 0 };
     }
   }, [currentSong, nativeAndroid, nativeIsPlaying, yt.isPlaying, isLoadingSong]);
+
+  useEffect(() => {
+    return () => {
+      if (queueRecoveryRef.current.timer) {
+        clearTimeout(queueRecoveryRef.current.timer);
+        queueRecoveryRef.current.timer = null;
+      }
+    };
+  }, []);
 
   // ───── Open playlist ─────
   async function openPlaylist(pl) {
