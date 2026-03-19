@@ -607,6 +607,7 @@ export default function Home() {
   });
   const nativeAndroid = isNativeAndroid();
   const nativeAudioEngineEnabled = true;
+  const nativeHardDisabledRef = useRef(false);
 
   useEffect(() => {
     currentSongRef.current = currentSong;
@@ -676,10 +677,25 @@ export default function Home() {
 
   function canAttemptNativePlayback() {
     const now = nowMs();
+    if (nativeHardDisabledRef.current) return false;
     const st = nativeFailureRef.current;
     if (st.cooldownUntil > now) return false;
     if (st.backoffUntil > now) return false;
     return true;
+  }
+
+  function disableNativeAudioForSession(reason = 'native_disabled') {
+    nativeHardDisabledRef.current = true;
+    nativeFailureRef.current = {
+      failures: 99,
+      lastFailureAt: nowMs(),
+      backoffUntil: nowMs() + 600000,
+      cooldownUntil: nowMs() + 600000,
+    };
+    nativeTrackLoadedRef.current = false;
+    nativeShouldPlayRef.current = false;
+    setNativeIsPlaying(false);
+    console.warn('[Android] Native audio engine disabled for this session:', reason);
   }
 
   function registerNativeFailure(reason = 'unknown') {
@@ -1337,6 +1353,14 @@ export default function Home() {
           handleNext();
         } else if (action === 'previous') {
           handlePrev();
+        } else if (action === 'native_error') {
+          disableNativeAudioForSession('native_player_error');
+          isLoadingSongRef.current = false;
+          setIsLoadingSong(false);
+          setLoadingSongKey(null);
+          if (currentSong) {
+            playSongDirect(currentSong, queueRef.current?.length ? queueRef.current : null, true);
+          }
         } else if (action === 'play' && nativeTrackLoadedRef.current && activeEngineRef.current === 'native-audio') {
           setNativeIsPlaying(true);
           setOptimisticPlaying(true);

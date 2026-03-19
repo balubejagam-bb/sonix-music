@@ -255,6 +255,7 @@ public class MusicPlaybackService extends MediaSessionService {
             }
             @Override public void onPlayerError(androidx.media3.common.PlaybackException e) {
                 android.util.Log.e("SonixMusic", "Player error: " + e.getMessage(), e);
+                MusicPlayerPlugin.triggerWebAction("native_error");
             }
             @Override public void onMediaMetadataChanged(MediaMetadata m) { notifyState(); }
         });
