@@ -770,52 +770,37 @@ export default function Home() {
 
   function isLikelyDirectAudioUrl(url = '') {
     if (!/^https?:\/\//i.test(url)) return false;
-    return /\.(mp3|m4a|aac|ogg|flac|wav)(\?|$)/i.test(url) ||
+    return /\.(mp3|m4a|m4b|aac|ogg|flac|wav|mp4)(\?|$)/i.test(url) ||
       /media|cdn|stream|audio|saavncdn|jiosaavn/i.test(url);
   }
 
   function buildNativeQueue(sourceQueue = [], selectedSong = null) {
-    const seen = new Set();
-    const queue = [];
+    const queue = sourceQueue
+      .filter((s) => typeof s?.url === 'string' && /^https?:\/\//i.test(s.url))
+      .map((s) => ({
+        url: s.url,
+        title: s.title || 'Unknown Track',
+        artist: s.artist || 'Unknown Artist',
+        album: s.album || 'Sonix Music',
+        artwork: s.image || s.thumbnail || '',
+      }));
 
-    const pushSong = (song) => {
-      if (!song) return;
-      const key = songKey(song);
-      if (seen.has(key)) return;
+    if (!queue.length && selectedSong && canPlayNatively(selectedSong)) {
+      return {
+        queue: [{
+          url: selectedSong.url,
+          title: selectedSong.title || 'Unknown Track',
+          artist: selectedSong.artist || 'Unknown Artist',
+          album: selectedSong.album || 'Sonix Music',
+          artwork: selectedSong.image || selectedSong.thumbnail || '',
+        }],
+        index: 0,
+      };
+    }
 
-      let url = typeof song?.url === 'string' ? song.url : '';
-      if (!url || !/^https?:\/\//i.test(url) || !isLikelyDirectAudioUrl(url)) {
-        const cached = streamUrlCacheRef.current.get(key) || localStorage.getItem(`sonix_stream_${key}`) || '';
-        if (/^https?:\/\//i.test(cached)) {
-          url = cached;
-        }
-      }
-
-      if (!url || !/^https?:\/\//i.test(url)) return;
-
-      queue.push({
-        url,
-        title: song.title || 'Unknown Track',
-        artist: song.artist || 'Unknown Artist',
-        album: song.album || 'Sonix Music',
-        artwork: song.image || song.thumbnail || '',
-        __key: key,
-      });
-      seen.add(key);
-    };
-
-    // Put selected song first so resume always starts from the expected track.
-    pushSong(selectedSong);
-    for (const s of sourceQueue) pushSong(s);
-
-    const selectedKey = selectedSong ? songKey(selectedSong) : '';
-    let index = Math.max(0, queue.findIndex((s) => s.__key === selectedKey));
-    if (index < 0) index = 0;
-
-    return {
-      queue: queue.map(({ __key, ...rest }) => rest),
-      index,
-    };
+    const selectedUrl = selectedSong?.url || '';
+    const index = Math.max(0, queue.findIndex((s) => s.url === selectedUrl));
+    return { queue, index };
   }
 
   // ───── Load initial data & cache (Once) ─────
@@ -904,21 +889,6 @@ export default function Home() {
   }, [yt.currentTime, nativeAndroid]);
 
   useEffect(() => {
-    const shouldDoNativeHandoff = () => {
-      if (!nativeAndroid || !currentSong) return false;
-      if (!canUseNativePlugins()) return false;
-      // If native queue is already active, do not re-create queue in background.
-      // Recreating it restarts the current song and can collapse queue to one item.
-      if (
-        activeEngineRef.current === 'native-audio' &&
-        nativeTrackLoadedRef.current &&
-        nativeShouldPlayRef.current
-      ) {
-        return false;
-      }
-      return true;
-    };
-
     const handoffToNativeBackground = async () => {
       if (!nativeAndroid || !currentSong || !canUseNativePlugins()) return false;
 
@@ -929,14 +899,15 @@ export default function Home() {
       const streamUrl = await resolveAudioStreamForSong(currentSong, videoId, { prefetch: true });
       if (!streamUrl) return false;
 
-      const selectedSong = { ...currentSong, url: streamUrl, videoId };
-      const queueSource = queueRef.current?.length ? queueRef.current : [selectedSong];
-      const { queue, index } = buildNativeQueue(queueSource, selectedSong);
-      if (!queue.length) return false;
-
       await NativeMusicPlayer.playQueue({
-        queue,
-        index,
+        queue: [{
+          url: streamUrl,
+          title: currentSong.title || 'Unknown Track',
+          artist: currentSong.artist || 'Unknown Artist',
+          album: currentSong.album || 'Sonix Music',
+          artwork: currentSong.image || currentSong.thumbnail || '',
+        }],
+        index: 0,
         shuffle: shuffleEnabled,
         repeatMode,
       });
@@ -947,8 +918,6 @@ export default function Home() {
 
       yt.pause();
       setCurrentSong(prev => prev ? { ...prev, url: streamUrl, videoId } : prev);
-      queueRef.current = queueSource;
-      queueIndexRef.current = Math.max(0, queueSource.findIndex((s) => songKey(s) === songKey(selectedSong)));
       nativeTrackLoadedRef.current = true;
       nativeShouldPlayRef.current = true;
       setOptimisticPlaying(true);
@@ -979,7 +948,7 @@ export default function Home() {
         
         if (
           nativeAndroid &&
-          shouldDoNativeHandoff() &&
+          currentSong &&
           (yt.isPlaying || optimisticPlayingRef.current || activeEngineRef.current !== 'native-audio')
         ) {
           try {
@@ -1038,7 +1007,7 @@ export default function Home() {
             nativeLastResumeAtRef.current = now;
             NativeMusicPlayer.resume().catch(() => {});
           }
-        } else if (shouldDoNativeHandoff()) {
+        } else if (currentSong) {
           try {
             await handoffToNativeBackground();
           } catch {}
@@ -1284,8 +1253,16 @@ export default function Home() {
             }
           }
 
-          // Do not force manual next from native STATE_ENDED.
-          // ExoPlayer handles queue transitions natively; manual jumps can cause loading loops.
+          // STATE_ENDED = 4; guard against false positives from transient states.
+          if (
+            res.playbackState === 4 &&
+            typeof res.duration === 'number' &&
+            typeof res.currentTime === 'number' &&
+            res.duration > 0 &&
+            res.currentTime >= Math.max(0, res.duration - 1)
+          ) {
+             handleNext();
+          }
         }
       });
 
@@ -2052,33 +2029,9 @@ export default function Home() {
             setIsLoadingSong(false);
             setLoadingSongKey(null);
             prefetchUpcomingVideoIds();
-
-            // Quick async validation. If native failed to start, then switch to fallback.
-            let nativeReady = false;
-            await sleep(350);
-            if (isStale()) return;
-            try {
-              const st = await NativeMusicPlayer.getPosition();
-              const hasProgress = (st?.duration || 0) > 0 || (st?.currentTime || 0) > 0;
-              nativeReady = !!(st?.isPlaying || hasProgress || st?.playWhenReady);
-            } catch {}
-
-            if (!nativeReady) {
-              console.warn('[Android] Native player did not start via ExoPlayer.');
-              registerNativeFailure('native_not_ready');
-              nativeTrackLoadedRef.current = false;
-              setNativeIsPlaying(false);
-              nativeShouldPlayRef.current = false;
-              androidFallbackSong = songWithUrl;
-              forceWebFallback = true;
-              await NativeMusicPlayer.pause().catch(() => {});
-              isLoadingSongRef.current = false;
-              setIsLoadingSong(true);
-              setLoadingSongKey(key);
-              // Continue into web/YT fallback path below.
-            } else {
-              return;
-            }
+            // Native queue accepted: rely on plugin/player state updates and watchdog recovery.
+            // Avoid immediate false-negative fallback loops that can lock UI in loading state.
+            return;
           }
 
           // Stream resolution failed — fall back to web/YT playback path.
@@ -2333,27 +2286,6 @@ export default function Home() {
   function handleNext() {
     const q = queueRef.current;
     if (!q || q.length === 0) return;
-
-    if (nativeAndroid && activeEngineRef.current === 'native-audio' && nativeTrackLoadedRef.current) {
-      nativeShouldPlayRef.current = true;
-      setNativeIsPlaying(true);
-      setOptimisticPlaying(true);
-
-      if (!shuffleEnabled) {
-        const nextIdx = (queueIndexRef.current + 1) % q.length;
-        queueIndexRef.current = nextIdx;
-        setCurrentSong(q[nextIdx]);
-      }
-
-      NativeMusicPlayer.next().catch(() => {
-        const nextIdx = (queueIndexRef.current + 1) % q.length;
-        queueIndexRef.current = nextIdx;
-        isLoadingSongRef.current = false;
-        playSongDirect(q[nextIdx], null, true);
-      });
-      return;
-    }
-
     let nextIdx;
     if (shuffleEnabled) {
       nextIdx = Math.floor(Math.random() * q.length);
@@ -2368,23 +2300,6 @@ export default function Home() {
   function handlePrev() {
     const q = queueRef.current;
     if (!q || q.length === 0) return;
-
-    if (nativeAndroid && activeEngineRef.current === 'native-audio' && nativeTrackLoadedRef.current) {
-      nativeShouldPlayRef.current = true;
-      setNativeIsPlaying(true);
-      setOptimisticPlaying(true);
-
-      const prevIdx = queueIndexRef.current <= 0 ? q.length - 1 : queueIndexRef.current - 1;
-      queueIndexRef.current = prevIdx;
-      setCurrentSong(q[prevIdx]);
-
-      NativeMusicPlayer.previous().catch(() => {
-        isLoadingSongRef.current = false;
-        playSongDirect(q[prevIdx], null, true);
-      });
-      return;
-    }
-
     const prevIdx = queueIndexRef.current <= 0 ? q.length - 1 : queueIndexRef.current - 1;
     queueIndexRef.current = prevIdx;
     isLoadingSongRef.current = false; // force-reset guard
