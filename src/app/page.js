@@ -1612,7 +1612,21 @@ export default function Home() {
   }
 
   function songKey(song) {
-    return song.songId || song._id || song.videoId || `${song.title || ''}::${song.artist || ''}`;
+    if (!song || typeof song !== 'object') return '';
+
+    const stableId = song.songId || song._id || song.id || song.videoId;
+    if (stableId) return String(stableId);
+
+    if (typeof song.url === 'string' && song.url.trim()) {
+      return `url::${song.url.trim()}`;
+    }
+
+    const title = (song.title || '').toString().trim().toLowerCase();
+    const artist = (song.artist || '').toString().trim().toLowerCase();
+    const album = (song.album || '').toString().trim().toLowerCase();
+    const source = (song.source || '').toString().trim().toLowerCase();
+
+    return `${title}::${artist}::${album}::${source}`;
   }
 
   function isLikelyImageUrl(url = '') {
