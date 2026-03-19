@@ -580,7 +580,6 @@ export default function Home() {
   const videoIdCacheRef = useRef(new Map());
   const streamUrlCacheRef = useRef(new Map());
   const pendingStreamResolveRef = useRef(new Map());
-  const STREAM_CACHE_TTL_MS = 15 * 60 * 1000;
   const nativeShouldPlayRef = useRef(false);
   const optimisticPlayingRef = useRef(false);
   const nativeLastResumeAtRef = useRef(0);
@@ -598,6 +597,7 @@ export default function Home() {
   const nativeTrackLoadedRef = useRef(false);
   const activeEngineRef = useRef('none'); // none | native-audio | web-audio | web-video
   const lastQueueAdvanceRef = useRef({ at: 0, action: '' });
+  const queueRecoveryRef = useRef({ timer: null, targetKey: '', attempts: 0 });
   const nativeFailureRef = useRef({
     failures: 0,
     lastFailureAt: 0,
@@ -794,7 +794,9 @@ export default function Home() {
       }
 
       if (!isLikelyDirectAudioUrl(url)) {
-        const cached = getCachedStreamUrl(key);
+        const cached =
+          streamUrlCacheRef.current.get(key) ||
+          (typeof window !== 'undefined' ? localStorage.getItem(`sonix_stream_${key}`) : null);
         if (cached && /^https?:\/\//i.test(cached)) {
           url = cached;
         }
@@ -1607,49 +1609,6 @@ export default function Home() {
     return song.songId || song._id || song.videoId || `${song.title || ''}::${song.artist || ''}`;
   }
 
-  function getCachedStreamUrl(key) {
-    if (!key) return null;
-
-    const memoryValue = streamUrlCacheRef.current.get(key);
-    if (typeof memoryValue === 'string' && /^https?:\/\//i.test(memoryValue)) {
-      return memoryValue;
-    }
-
-    try {
-      const raw = localStorage.getItem(`sonix_stream_${key}`);
-      if (!raw) return null;
-
-      // Legacy plain-string cache entries are treated as stale.
-      if (!raw.trim().startsWith('{')) {
-        localStorage.removeItem(`sonix_stream_${key}`);
-        return null;
-      }
-
-      const parsed = JSON.parse(raw);
-      const url = parsed?.url;
-      const savedAt = Number(parsed?.savedAt || 0);
-      const fresh = /^https?:\/\//i.test(url || '') && savedAt > 0 && (Date.now() - savedAt) < STREAM_CACHE_TTL_MS;
-
-      if (!fresh) {
-        localStorage.removeItem(`sonix_stream_${key}`);
-        return null;
-      }
-
-      streamUrlCacheRef.current.set(key, url);
-      return url;
-    } catch {
-      return null;
-    }
-  }
-
-  function setCachedStreamUrl(key, url) {
-    if (!key || !/^https?:\/\//i.test(url || '')) return;
-    streamUrlCacheRef.current.set(key, url);
-    try {
-      localStorage.setItem(`sonix_stream_${key}`, JSON.stringify({ url, savedAt: Date.now() }));
-    } catch {}
-  }
-
   function isLikelyImageUrl(url = '') {
     if (typeof url !== 'string') return false;
     return /\.(jpg|jpeg|png|gif|webp|svg)(\?|$)/i.test(url);
@@ -1723,7 +1682,7 @@ export default function Home() {
       // Keep this shallow to avoid aggressive network churn on mobile.
       if (step <= 2) {
         const key = songKey(nextSong);
-        const cached = getCachedStreamUrl(key);
+        const cached = streamUrlCacheRef.current.get(key) || localStorage.getItem(`sonix_stream_${key}`);
         if (!cached) {
           resolveAudioStreamForSong(nextSong, nextVideoId || null, { prefetch: true }).catch(() => {});
         }
@@ -1981,7 +1940,7 @@ export default function Home() {
           }
 
           // Fast path 0: reuse resolved stream from in-memory/local cache
-          const cachedStream = getCachedStreamUrl(key);
+          const cachedStream = streamUrlCacheRef.current.get(key) || localStorage.getItem(`sonix_stream_${key}`);
           if (cachedStream && /^https?:\/\//i.test(cachedStream)) {
             streamUrl = cachedStream;
           }
@@ -2052,7 +2011,8 @@ export default function Home() {
 
           if (streamUrl) {
             if (isStale()) return;
-            setCachedStreamUrl(key, streamUrl);
+            streamUrlCacheRef.current.set(key, streamUrl);
+            try { localStorage.setItem(`sonix_stream_${key}`, streamUrl); } catch {}
 
             const artwork = song.thumbnail || song.image || 'https://picsum.photos/seed/sonixart/200';
             const songWithUrl = { ...song, url: streamUrl, videoId: videoId || song.videoId };
@@ -2068,7 +2028,7 @@ export default function Home() {
 
               let cUrl = candidate.url || '';
               if (!isLikelyDirectAudioUrl(cUrl)) {
-                const cached = getCachedStreamUrl(cKey);
+                const cached = streamUrlCacheRef.current.get(cKey) || localStorage.getItem(`sonix_stream_${cKey}`);
                 if (cached && /^https?:\/\//i.test(cached)) cUrl = cached;
               }
               if (!cUrl || !/^https?:\/\//i.test(cUrl)) return;
@@ -2418,12 +2378,60 @@ export default function Home() {
       return currentIdx <= 0 ? q.length - 1 : currentIdx - 1;
     }
 
+    if (reason === 'ended' && repeatMode === 'off' && currentIdx >= q.length - 1) {
+      return -1;
+    }
+
     return (currentIdx + 1) % q.length;
+  }
+
+  function syncQueueIndexToCurrentSong() {
+    const q = queueRef.current;
+    if (!q || q.length === 0 || !currentSong) return;
+    const key = songKey(currentSong);
+    const idx = q.findIndex((s) => songKey(s) === key);
+    if (idx >= 0) {
+      queueIndexRef.current = idx;
+    }
+  }
+
+  function scheduleQueueRecovery(targetSong, reason) {
+    if (queueRecoveryRef.current.timer) {
+      clearTimeout(queueRecoveryRef.current.timer);
+      queueRecoveryRef.current.timer = null;
+    }
+
+    const targetKey = songKey(targetSong);
+    const nextAttempts = reason === 'recovery'
+      ? queueRecoveryRef.current.attempts + 1
+      : 1;
+
+    if (nextAttempts > 2) {
+      queueRecoveryRef.current = { timer: null, targetKey: '', attempts: 0 };
+      return;
+    }
+
+    queueRecoveryRef.current = {
+      timer: setTimeout(() => {
+        const stillTarget = currentSong && songKey(currentSong) === targetKey;
+        const isPlayingNow = nativeAndroid
+          ? (nativeIsPlaying || nativeShouldPlayRef.current)
+          : yt.isPlaying;
+
+        if (stillTarget && !isPlayingNow && !isLoadingSongRef.current) {
+          handleNext('recovery');
+        }
+      }, 9000),
+      targetKey,
+      attempts: nextAttempts,
+    };
   }
 
   function handleNext(reason = 'manual') {
     const q = queueRef.current;
     if (!q || q.length === 0) return;
+
+    syncQueueIndexToCurrentSong();
 
     const now = Date.now();
     if (now - lastQueueAdvanceRef.current.at < 650 && lastQueueAdvanceRef.current.action === `next:${reason}`) {
@@ -2439,12 +2447,24 @@ export default function Home() {
     lastQueueAdvanceRef.current = { at: now, action: `next:${reason}` };
     queueIndexRef.current = nextIdx;
     isLoadingSongRef.current = false; // force-reset guard
-    playSongDirect(q[nextIdx], null, true);
+    const targetSong = q[nextIdx];
+    playSongDirect(targetSong, null, true);
+
+    if (reason === 'ended' || reason === 'recovery') {
+      scheduleQueueRecovery(targetSong, reason);
+    } else {
+      if (queueRecoveryRef.current.timer) {
+        clearTimeout(queueRecoveryRef.current.timer);
+      }
+      queueRecoveryRef.current = { timer: null, targetKey: '', attempts: 0 };
+    }
   }
 
   function handlePrev() {
     const q = queueRef.current;
     if (!q || q.length === 0) return;
+
+    syncQueueIndexToCurrentSong();
 
     const now = Date.now();
     if (now - lastQueueAdvanceRef.current.at < 650 && lastQueueAdvanceRef.current.action === 'previous:manual') {
@@ -2464,6 +2484,22 @@ export default function Home() {
   useEffect(() => {
     yt.onEndRef.current = () => handleNext('ended');
   });
+
+  useEffect(() => {
+    const recovery = queueRecoveryRef.current;
+    if (!recovery.targetKey || !currentSong) return;
+    if (songKey(currentSong) !== recovery.targetKey) return;
+
+    const isPlayingNow = nativeAndroid
+      ? (nativeIsPlaying || nativeShouldPlayRef.current)
+      : yt.isPlaying;
+    if (isPlayingNow || isLoadingSong) {
+      if (recovery.timer) {
+        clearTimeout(recovery.timer);
+      }
+      queueRecoveryRef.current = { timer: null, targetKey: '', attempts: 0 };
+    }
+  }, [currentSong, nativeAndroid, nativeIsPlaying, yt.isPlaying, isLoadingSong]);
 
   // ───── Open playlist ─────
   async function openPlaylist(pl) {
@@ -2556,7 +2592,7 @@ export default function Home() {
     const key = songKey(song);
     const preferFast = options?.prefetch === true;
 
-    const cachedStream = getCachedStreamUrl(key);
+    const cachedStream = streamUrlCacheRef.current.get(key) || localStorage.getItem(`sonix_stream_${key}`);
     if (cachedStream && /^https?:\/\//i.test(cachedStream)) {
       return cachedStream;
     }
@@ -2645,7 +2681,8 @@ export default function Home() {
       }
 
       if (resolved && /^https?:\/\//i.test(resolved)) {
-        setCachedStreamUrl(key, resolved);
+        streamUrlCacheRef.current.set(key, resolved);
+        try { localStorage.setItem(`sonix_stream_${key}`, resolved); } catch {}
       }
 
       return resolved;
