@@ -1261,7 +1261,11 @@ export default function Home() {
             res.duration > 0 &&
             res.currentTime >= Math.max(0, res.duration - 1)
           ) {
-             handleNext();
+            // Native Android audio completion is bridged by the service via onWebAction("next").
+            // Avoid firing a second local next from JS and skipping tracks.
+            if (!(nativeAndroid && activeEngineRef.current === 'native-audio')) {
+              handleNext();
+            }
           }
         }
       });

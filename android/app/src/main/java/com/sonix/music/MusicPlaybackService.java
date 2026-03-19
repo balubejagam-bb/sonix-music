@@ -192,7 +192,16 @@ public class MusicPlaybackService extends MediaSessionService {
         currentPlayer = player;
 
         fp.addListener(new Player.Listener() {
-            @Override public void onPlaybackStateChanged(int state) { notifyState(); }
+            @Override public void onPlaybackStateChanged(int state) {
+                notifyState();
+                // If the native queue reaches terminal END with no next item,
+                // ask the web layer to resolve/play the next logical track.
+                if (state == Player.STATE_ENDED && shouldUseNativeTransport()) {
+                    if (!player.hasNextMediaItem() && player.getPlayWhenReady()) {
+                        MusicPlayerPlugin.triggerWebAction("next");
+                    }
+                }
+            }
             @Override public void onIsPlayingChanged(boolean isPlaying) {
                 notifyState();
                 if (isPlaying) updateHandler.post(updateRunnable);
