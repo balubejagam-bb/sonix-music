@@ -67,8 +67,12 @@ public class MusicPlaybackService extends MediaSessionService {
         }
     };
 
+    private boolean hasNativeQueue() {
+        return player != null && player.getMediaItemCount() > 0;
+    }
+
     private boolean playNextNativeOrWrap() {
-        if (player == null || !shouldUseNativeTransport()) return false;
+        if (player == null || !hasNativeQueue()) return false;
 
         if (player.hasNextMediaItem()) {
             ytMode = false;
@@ -89,7 +93,7 @@ public class MusicPlaybackService extends MediaSessionService {
     }
 
     private boolean playPreviousNativeOrWrap() {
-        if (player == null || !shouldUseNativeTransport()) return false;
+        if (player == null || !hasNativeQueue()) return false;
 
         if (player.hasPreviousMediaItem()) {
             ytMode = false;
@@ -239,7 +243,7 @@ public class MusicPlaybackService extends MediaSessionService {
                 // If the native queue reaches terminal END with no next item,
                 // ask the web layer to resolve/play the next logical track.
                 if (state == Player.STATE_ENDED && shouldUseNativeTransport()) {
-                    if (player.getPlayWhenReady() && !playNextNativeOrWrap()) {
+                    if (!playNextNativeOrWrap()) {
                         MusicPlayerPlugin.triggerWebAction("next");
                     }
                 }
@@ -365,8 +369,11 @@ public class MusicPlaybackService extends MediaSessionService {
 
                 // ── YouTube-mode: update notification metadata only ──────────
                 case ACTION_UPDATE_META:
-                    ytMode    = true;
-                    nativeSessionLoaded = false;
+                    // Do not downgrade native transport state when a native queue exists.
+                    if (!hasNativeQueue()) {
+                        ytMode = true;
+                        nativeSessionLoaded = false;
+                    }
                     ytPlaying = intent.getBooleanExtra("isPlaying", true);
                     currentTitle  = intent.getStringExtra("title")  != null
                         ? intent.getStringExtra("title")  : "Sonix Music";
