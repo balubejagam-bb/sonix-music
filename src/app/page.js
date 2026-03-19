@@ -889,6 +889,21 @@ export default function Home() {
   }, [yt.currentTime, nativeAndroid]);
 
   useEffect(() => {
+    const shouldDoNativeHandoff = () => {
+      if (!nativeAndroid || !currentSong) return false;
+      if (!canUseNativePlugins()) return false;
+      // If native queue is already active, do not re-create queue in background.
+      // Recreating it restarts the current song and can collapse queue to one item.
+      if (
+        activeEngineRef.current === 'native-audio' &&
+        nativeTrackLoadedRef.current &&
+        nativeShouldPlayRef.current
+      ) {
+        return false;
+      }
+      return true;
+    };
+
     const handoffToNativeBackground = async () => {
       if (!nativeAndroid || !currentSong || !canUseNativePlugins()) return false;
 
@@ -948,7 +963,7 @@ export default function Home() {
         
         if (
           nativeAndroid &&
-          currentSong &&
+          shouldDoNativeHandoff() &&
           (yt.isPlaying || optimisticPlayingRef.current || activeEngineRef.current !== 'native-audio')
         ) {
           try {
@@ -1007,7 +1022,7 @@ export default function Home() {
             nativeLastResumeAtRef.current = now;
             NativeMusicPlayer.resume().catch(() => {});
           }
-        } else if (currentSong) {
+        } else if (shouldDoNativeHandoff()) {
           try {
             await handoffToNativeBackground();
           } catch {}
