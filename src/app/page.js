@@ -606,6 +606,7 @@ export default function Home() {
     cooldownUntil: 0,
   });
   const nativeAndroid = isNativeAndroid();
+  const nativeAudioEngineEnabled = false;
 
   useEffect(() => {
     currentSongRef.current = currentSong;
@@ -722,7 +723,7 @@ export default function Home() {
       return;
     }
 
-    if (nativeAndroid && (nativeTrackLoadedRef.current || nativeIsPlaying || nativeShouldPlayRef.current)) {
+    if (nativeAudioEngineEnabled && (nativeTrackLoadedRef.current || nativeIsPlaying || nativeShouldPlayRef.current)) {
       await NativeMusicPlayer.pause().catch(() => {});
     }
     setNativeIsPlaying(false);
@@ -927,7 +928,7 @@ export default function Home() {
 
   useEffect(() => {
     const handoffToNativeBackground = async () => {
-      if (!nativeAndroid || !currentSong || !canUseNativePlugins()) return false;
+      if (!nativeAudioEngineEnabled || !currentSong || !canUseNativePlugins()) return false;
 
       // Do not collapse an existing native queue while already on native audio.
       if (
@@ -1243,7 +1244,7 @@ export default function Home() {
 
   // Listen to native player for progress updates and web actions
   useEffect(() => {
-    if (nativeAndroid) {
+    if (nativeAudioEngineEnabled) {
       const stateListener = NativeMusicPlayer.addListener('onStateChanged', (res) => {
         if (res) {
           updateNativePlaybackSnapshot(res);
@@ -1928,7 +1929,7 @@ export default function Home() {
     try {
       // On Android: use native ExoPlayer only for Audio mode.
       // Keep Video mode on web/YT path so users can use video playback intentionally.
-      if (nativeAndroid && !videoEnabled && canUseNativePlugins()) {
+      if (nativeAudioEngineEnabled && !videoEnabled && canUseNativePlugins()) {
         if (!canAttemptNativePlayback()) {
           forceWebFallback = true;
         }
@@ -2329,7 +2330,7 @@ export default function Home() {
   }, [currentSong, yt.isPlaying, nativeAndroid, videoEnabled, nativeIsPlaying, optimisticPlaying]);
 
   useEffect(() => {
-    if (!nativeAndroid || !currentSong || !canUseNativePlugins()) return;
+    if (!nativeAudioEngineEnabled || !currentSong || !canUseNativePlugins()) return;
 
     const engine = activeEngineRef.current;
     if (engine !== 'web-video' && engine !== 'web-audio') return;
@@ -2737,7 +2738,7 @@ export default function Home() {
 
     const resumeAt = yt.currentTime || 0;
 
-    if (nativeAndroid) {
+    if (nativeAudioEngineEnabled) {
       try {
         await NativeMusicPlayer.pause();
       } catch {}
@@ -2771,7 +2772,7 @@ export default function Home() {
 
     const resumeAt = yt.currentTime || 0;
 
-    if (nativeAndroid) {
+    if (nativeAudioEngineEnabled) {
       const videoId = currentSong.videoId || await resolveSongVideoId(currentSong);
       const nativeSourceSong = {
         ...currentSong,
@@ -2878,7 +2879,7 @@ export default function Home() {
 
 
   async function handlePlayPauseToggle() {
-    if (nativeAndroid && currentSong && !videoEnabled) {
+    if (nativeAudioEngineEnabled && currentSong && !videoEnabled) {
       try {
         const canControlNative =
           activeEngineRef.current === 'native-audio' &&
@@ -2966,7 +2967,7 @@ export default function Home() {
     const t = Math.max(0, timeInSeconds);
     const uiDuration = yt.duration > 0 ? yt.duration : Math.max(0, Number(currentSong?.duration || 0));
 
-    if (nativeAndroid && !videoEnabled && canUseNativePlugins() && nativeTrackLoadedRef.current) {
+    if (nativeAudioEngineEnabled && !videoEnabled && canUseNativePlugins() && nativeTrackLoadedRef.current) {
       // Optimistically update seek bar immediately in native mode too.
       yt.updateNativeTime(t, uiDuration > 0 ? uiDuration : undefined);
       NativeMusicPlayer.seekTo({ positionMs: t * 1000 }).catch(() => {});
@@ -3007,7 +3008,7 @@ export default function Home() {
   async function handleToggleShuffle() {
     const next = !shuffleEnabled;
     setShuffleEnabled(next);
-    if (nativeAndroid) {
+    if (nativeAudioEngineEnabled) {
       try {
         await NativeMusicPlayer.setShuffle({ enabled: next });
       } catch (e) {
@@ -3021,7 +3022,7 @@ export default function Home() {
     const idx = order.indexOf(repeatMode);
     const next = order[(idx + 1) % order.length];
     setRepeatMode(next);
-    if (nativeAndroid) {
+    if (nativeAudioEngineEnabled) {
       try {
         await NativeMusicPlayer.setRepeatMode({ mode: next });
       } catch (e) {
