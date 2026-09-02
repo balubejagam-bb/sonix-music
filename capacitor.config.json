@@ -3,6 +3,7 @@
   "appName": "Sonix Music",
   "webDir": "out",
   "server": {
+    "url": "https://sonix-music.vercel.app",
     "androidScheme": "https",
     "cleartext": true
   },

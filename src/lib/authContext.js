@@ -36,6 +36,19 @@ function apiPath(path) {
   return base ? `${base}${path}` : path;
 }
 
+async function readJsonResponse(res, fallbackMessage) {
+  const text = await res.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    if (!res.ok) {
+      throw new Error(fallbackMessage);
+    }
+    return {};
+  }
+}
+
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -175,10 +188,11 @@ export function AuthProvider({ children }) {
     const res = await fetch(apiPath('/api/auth/login'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email: (email || '').trim().toLowerCase(), password }),
     });
-    const data = await res.json();
+    const data = await readJsonResponse(res, 'Login failed. Please check your connection and try again.');
     if (!res.ok) throw new Error(data.error || 'Login failed');
+    if (!data.token || !data.user) throw new Error('Login failed. Please try again.');
     localStorage.setItem('sonix_token', data.token);
     setUser(data.user);
     fetchLikedSongs(data.token);
@@ -190,12 +204,19 @@ export function AuthProvider({ children }) {
     const res = await fetch(apiPath('/api/auth/register'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, email, password }),
+      body: JSON.stringify({
+        name: (name || '').trim(),
+        email: (email || '').trim().toLowerCase(),
+        password,
+      }),
     });
-    const data = await res.json();
+    const data = await readJsonResponse(res, 'Registration failed. Please check your connection and try again.');
     if (!res.ok) throw new Error(data.error || 'Registration failed');
+    if (!data.token || !data.user) throw new Error('Registration failed. Please try again.');
     localStorage.setItem('sonix_token', data.token);
     setUser(data.user);
+    fetchLikedSongs(data.token);
+    fetchUserPlaylists(data.token);
     return data;
   };
 

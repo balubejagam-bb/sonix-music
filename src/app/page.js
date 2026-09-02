@@ -607,7 +607,7 @@ export default function Home() {
   });
   const nativeAndroid = isNativeAndroid();
   const nativeAudioEngineEnabled = true;
-  const nativeHardDisabledRef = useRef(true);
+  const nativeHardDisabledRef = useRef(!isNativeAndroid());
   const nativeAudioActive = nativeAudioEngineEnabled && !nativeHardDisabledRef.current;
 
   useEffect(() => {
@@ -1943,6 +1943,7 @@ export default function Home() {
     }
     setIsLoadingSong(true);
     setLoadingSongKey(key);
+    setCurrentSong(song);
 
     // Reset progress immediately when switching tracks to prevent old-time flicker.
     const initialDuration = Math.max(0, Number(song?.duration || 0));
@@ -1978,8 +1979,8 @@ export default function Home() {
         }
 
         try {
-          const nativeStreamTimeoutMs = 10000;
-          const nativeLookupTimeoutMs = 7000;
+          const nativeStreamTimeoutMs = 6500;
+          const nativeLookupTimeoutMs = 4500;
           let streamUrl = null;
           let videoId = normalizeVideoId(song.videoId);
 
@@ -1998,6 +1999,12 @@ export default function Home() {
           if (!streamUrl && isLikelyDirectAudioUrl(song.url || '')) {
             streamUrl = song.url;
           }
+
+          NativeMusicPlayer.updateMeta({
+            title: song.title || 'Sonix Music',
+            artist: song.artist || 'Resolving audio...',
+            isPlaying: true,
+          }).catch(() => {});
 
           // Path 1: YT song — resolve videoId first if needed, then get stream
           if (!streamUrl) {
@@ -3028,15 +3035,6 @@ export default function Home() {
     return e.clientX;
   }
 
-  function seekFromBarEvent(e) {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = getEventX(e);
-    const pct = Math.max(0, Math.min(1, (x - rect.left) / rect.width));
-    const durationForSeek = yt.duration > 0 ? yt.duration : Math.max(0, Number(currentSong?.duration || 0));
-    const t = pct * durationForSeek;
-    handleSeek(t);
-  }
-
   // When full player opens and song is set but not playing — auto-resume
   useEffect(() => {
     if (!fullPlayerOpen || !currentSong || nativeAndroid || !videoEnabled) return;
@@ -3147,16 +3145,22 @@ export default function Home() {
 
     window.addEventListener('mousemove', move, { passive: false });
     window.addEventListener('touchmove', move, { passive: false });
+    window.addEventListener('pointermove', move, { passive: false });
     window.addEventListener('mouseup', end);
     window.addEventListener('touchend', end);
     window.addEventListener('touchcancel', end);
+    window.addEventListener('pointerup', end);
+    window.addEventListener('pointercancel', end);
 
     return () => {
       window.removeEventListener('mousemove', move);
       window.removeEventListener('touchmove', move);
+      window.removeEventListener('pointermove', move);
       window.removeEventListener('mouseup', end);
       window.removeEventListener('touchend', end);
       window.removeEventListener('touchcancel', end);
+      window.removeEventListener('pointerup', end);
+      window.removeEventListener('pointercancel', end);
     };
   }, [currentSong, yt.duration]);
 
@@ -3308,6 +3312,11 @@ export default function Home() {
             )}
           </div>
           
+          <div className="developer-credit">
+            <span>Developed by</span>
+            <strong>balubejagam</strong>
+          </div>
+
           <div className="sidebar-bottom-space" aria-hidden="true"></div>
 
           {/* Hidden File Input */}
@@ -3750,12 +3759,7 @@ export default function Home() {
                 <span className="time">{fmt(yt.currentTime)}</span>
                 <div
                   className="progress-track"
-                  onClick={(e) => { e.stopPropagation(); seekFromBarEvent(e); }}
                   onPointerDown={(e) => { e.stopPropagation(); startSeekDrag(e); }}
-                  onPointerUp={(e) => { e.stopPropagation(); seekFromBarEvent(e); }}
-                  onMouseDown={(e) => { e.stopPropagation(); startSeekDrag(e); }}
-                  onTouchStart={(e) => { e.stopPropagation(); startSeekDrag(e); }}
-                  onTouchEnd={(e) => { e.stopPropagation(); if (e.cancelable) e.preventDefault(); seekFromBarEvent(e); }}
                 >
                   <div className="progress-filled" style={{ width: durationForUi ? `${(yt.currentTime / durationForUi) * 100}%` : '0%' }}></div>
                 </div>
@@ -3796,7 +3800,7 @@ export default function Home() {
       {/* Full Screen Player — Spotify style */}
       <div className={`full-player ${fullPlayerOpen ? 'open' : ''}`}>
         {currentSong && (
-          <div className="full-player-content spotify-player">
+          <div className={`full-player-content spotify-player ${videoEnabled ? 'video-mode' : ''}`}>
             {/* Blurred album art background */}
             <div
               className="sp-bg"
@@ -3862,12 +3866,7 @@ export default function Home() {
             <div className="sp-progress-wrap">
               <div
                 className="sp-progress-track"
-                onClick={seekFromBarEvent}
                 onPointerDown={startSeekDrag}
-                onPointerUp={seekFromBarEvent}
-                onMouseDown={startSeekDrag}
-                onTouchStart={startSeekDrag}
-                onTouchEnd={(e) => { if (e.cancelable) e.preventDefault(); seekFromBarEvent(e); }}
               >
                 <div className="sp-progress-fill" style={{ width: durationForUi ? `${(yt.currentTime / durationForUi) * 100}%` : '0%' }} />
                 <div className="sp-progress-thumb" style={{ left: durationForUi ? `${(yt.currentTime / durationForUi) * 100}%` : '0%' }} />

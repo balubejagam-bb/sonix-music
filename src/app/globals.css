@@ -150,6 +150,29 @@ html, body {
   line-height: 1.4;
 }
 
+.developer-credit {
+  margin: 4px 12px 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.04);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.developer-credit span,
+.developer-credit strong {
+  display: block;
+}
+
+.developer-credit strong {
+  margin-top: 3px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 800;
+}
+
 .sidebar-bottom-space {
   height: 20px;
 }
@@ -761,6 +784,7 @@ html, body {
   padding: 0 20px;
   z-index: 100;
   gap: 16px;
+  box-shadow: 0 -18px 50px rgba(0,0,0,0.45);
 }
 
 .player-song-info {
@@ -812,8 +836,11 @@ html, body {
 }
 
 .player-buttons button {
-  background: none;
-  border: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 18px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.06);
   color: var(--text-secondary);
   cursor: pointer;
   font-size: 18px;
@@ -826,8 +853,8 @@ html, body {
 .player-buttons button:hover { color: var(--text-primary); transform: scale(1.1); }
 
 .player-buttons .play-pause-btn {
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
   background: var(--text-primary);
   color: var(--bg-primary);
@@ -858,12 +885,12 @@ html, body {
 
 .progress-track {
   flex: 1;
-  height: 4px;
+  height: 6px;
   background: rgba(255,255,255,0.1);
-  border-radius: 2px;
+  border-radius: 999px;
   cursor: pointer;
   position: relative;
-  transition: height 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: background 0.2s ease;
   /* Use a pseudo-element for larger hit area instead of padding on the track itself */
 }
 
@@ -877,12 +904,12 @@ html, body {
   z-index: 1;
 }
 
-.progress-track:hover { height: 6px; }
+.progress-track:hover { background: rgba(255,255,255,0.18); }
 
 .progress-filled {
   height: 100%;
-  background: var(--text-primary);
-  border-radius: 2px;
+  background: var(--accent-primary);
+  border-radius: 999px;
   position: relative;
   transition: width 0.1s linear;
 }
@@ -918,8 +945,11 @@ html, body {
 }
 
 .volume-control button {
-  background: none;
-  border: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 17px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.06);
   color: var(--text-secondary);
   cursor: pointer;
   font-size: 16px;
@@ -927,16 +957,16 @@ html, body {
 
 .volume-track {
   width: 80px;
-  height: 4px;
+  height: 6px;
   background: rgba(255,255,255,0.1);
-  border-radius: 2px;
+  border-radius: 999px;
   cursor: pointer;
 }
 
 .volume-filled {
   height: 100%;
-  background: var(--text-primary);
-  border-radius: 2px;
+  background: var(--accent-secondary);
+  border-radius: 999px;
 }
 
 /* Filter Pills */
@@ -1664,14 +1694,19 @@ html, body {
   .song-actions { opacity: 1; }
 }
 .song-action-btn {
-  background: none;
-  border: none;
+  width: 34px;
+  height: 34px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.06);
   cursor: pointer;
   font-size: 18px;
-  padding: 4px 6px;
-  border-radius: 6px;
+  padding: 0;
+  border-radius: 17px;
   transition: background 0.15s, transform 0.1s;
   line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .song-action-btn:hover {
   background: rgba(255,255,255,0.08);
@@ -2007,6 +2042,10 @@ html, body {
   color: #fff;
 }
 
+.spotify-player.video-mode {
+  max-width: min(1040px, 100vw);
+}
+
 /* Blurred album art background */
 .sp-bg {
   position: absolute;
@@ -2194,13 +2233,14 @@ html, body {
   width: 100%;
   flex-shrink: 0;
   padding: 4px 0;
+  max-width: 720px;
 }
 
 .sp-progress-track {
   width: 100%;
-  height: 4px;
+  height: 6px;
   background: rgba(255,255,255,0.2);
-  border-radius: 2px;
+  border-radius: 999px;
   cursor: pointer;
   position: relative;
   margin-bottom: 8px;
@@ -2216,12 +2256,12 @@ html, body {
   right: 0;
 }
 
-.sp-progress-track:hover { height: 6px; }
+.sp-progress-track:hover { background: rgba(255,255,255,0.28); }
 
 .sp-progress-fill {
   height: 100%;
-  background: #fff;
-  border-radius: 2px;
+  background: #1db954;
+  border-radius: 999px;
   pointer-events: none;
   transition: width 0.08s linear;
 }
@@ -2257,18 +2297,23 @@ html, body {
   width: 100%;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
   flex-shrink: 0;
-  padding: 4px 0;
+  padding: 8px 0;
+  gap: clamp(16px, 5vw, 42px);
+  max-width: 720px;
 }
 
 .sp-ctrl-btn {
-  background: none;
-  border: none;
+  width: 48px;
+  height: 48px;
+  border-radius: 24px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
   color: rgba(255,255,255,0.6);
   font-size: 20px;
   cursor: pointer;
-  padding: 8px;
+  padding: 0;
   transition: color 0.2s, transform 0.15s;
   display: flex;
   align-items: center;
@@ -2284,8 +2329,8 @@ html, body {
 .sp-skip:hover { color: #fff; }
 
 .sp-play-btn {
-  width: 60px;
-  height: 60px;
+  width: 66px;
+  height: 66px;
   border-radius: 50%;
   background: #fff;
   color: #000;
@@ -2311,12 +2356,17 @@ html, body {
     max-width: 480px;
     margin: 0 auto;
   }
+  .spotify-player.video-mode {
+    max-width: min(1040px, 100vw);
+    padding-left: 48px;
+    padding-right: 48px;
+  }
   .sp-disc {
     width: 320px;
     height: 320px;
   }
   .sp-title { font-size: 24px; }
-  .sp-play-btn { width: 68px; height: 68px; font-size: 28px; }
+  .sp-play-btn { width: 72px; height: 72px; font-size: 28px; }
 }
 /* ── Mode Toggle (Audio/Video) ── */
 .mode-toggle {
@@ -2349,6 +2399,7 @@ html, body {
   background: rgba(0, 0, 0, 0.3);
   border-radius: 25px;
   padding: 3px;
+  border: 1px solid rgba(255,255,255,0.08);
 }
 .sp-mode-switch button {
   background: none;
@@ -2390,20 +2441,20 @@ html, body {
   right: 20px;
   opacity: 1;
   pointer-events: auto;
-  z-index: 1000;
+  z-index: 90;
   transform: scale(1);
 }
 .yt-video-container.in-full {
   position: fixed !important;
-  z-index: 10002 !important;
-  top: 36% !important;
+  z-index: 10000 !important;
+  top: clamp(156px, 34vh, 360px) !important;
   left: 50% !important;
   transform: translate(-50%, -50%) !important;
-  width: min(960px, 94vw) !important;
+  width: min(960px, 92vw) !important;
   height: auto !important;
   aspect-ratio: 16/9 !important;
   border-radius: 12px;
-  box-shadow: 0 50px 120px rgba(0,0,0,1);
+  box-shadow: 0 30px 90px rgba(0,0,0,0.85);
   background: #000;
   display: block !important;
   opacity: 1 !important;
@@ -2425,7 +2476,10 @@ html, body {
   width: 100%;
   height: auto;
   aspect-ratio: 16/9;
-  max-height: min(52vh, 420px);
+  max-height: min(46vh, 440px);
+  max-width: min(960px, 92vw);
+  flex: 0 1 auto;
+  margin: 8px auto 14px;
 }
 
 .sp-video-container {
@@ -2439,6 +2493,7 @@ html, body {
   position: relative;
   overflow: hidden;
   border: 1px solid rgba(255,255,255,0.1);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.05);
 }
 
 #full-player-video-box {
@@ -2472,22 +2527,22 @@ html, body {
     bottom: 80px;
   }
   .yt-video-container.in-full {
-    width: 94vw !important;
-    max-width: 94vw !important;
-    top: 30% !important;
+    width: 92vw !important;
+    max-width: 92vw !important;
+    top: clamp(140px, 28vh, 240px) !important;
     bottom: auto !important;
     border-radius: 10px;
     transform: translate(-50%, -50%) !important;
   }
 
   .sp-disc-wrap.is-video {
-    max-height: 40vh;
+    max-height: 34vh;
   }
 }
 
 @media (orientation: landscape) {
   .yt-video-container.in-full {
-    top: 44% !important;
+    top: 42% !important;
     width: min(78vw, 1200px) !important;
   }
 
@@ -2612,8 +2667,8 @@ html, body {
 /* Desktop Video in Full Player */
 @media (min-width: 769px) {
   .yt-video-container.in-full {
-    top: 36% !important;
-    width: min(900px, 88vw) !important;
+    top: clamp(180px, 34vh, 360px) !important;
+    width: min(920px, 88vw) !important;
     bottom: auto !important;
     transform: translate(-50%, -50%) !important;
   }

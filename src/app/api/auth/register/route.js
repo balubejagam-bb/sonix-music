@@ -62,6 +62,9 @@ export async function POST(request) {
     return response;
   } catch (error) {
     console.error('Register error:', error);
+    if (error?.code === 11000) {
+      return NextResponse.json({ error: 'Email already registered' }, { status: 409 });
+    }
     return NextResponse.json({ error: 'Registration failed' }, { status: 500 });
   }
 }
